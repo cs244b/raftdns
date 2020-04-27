@@ -1,0 +1,3 @@
+docker run --net raftnet --ip 172.18.0.5 raftexample:0.1 ./raftexample --id 1 --cluster http://172.18.0.5:12379,http://172.18.0.6:12379,http://172.18.0.7:12379 --port 12380 &
+docker run --net raftnet --ip 172.18.0.6 raftexample:0.1 ./raftexample --id 2 --cluster http://172.18.0.5:12379,http://172.18.0.6:12379,http://172.18.0.7:12379 --port 12380 &
+docker run --net raftnet --ip 172.18.0.7 raftexample:0.1 ./raftexample --id 3 --cluster http://172.18.0.5:12379,http://172.18.0.6:12379,http://172.18.0.7:12379 --port 12380 &
