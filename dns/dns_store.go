@@ -76,11 +76,29 @@ func stringsToRRs(sList []string) []dns.RR {
 	return rrs
 }
 
+func (s *dnsStore) HandleRecursiveQuery(req *dns.Msg, r *dns.Msg) {
+	c := new(dns.Client)
+	in, _, err := c.Exchange(req, "8.8.8.8:53")
+	if err != nil {
+		log.Fatal("Recursive failure")
+	}
+	*r = *in
+	return
+}
+
 // Handle query from outside.
 // Supporting iterative queries only ATM
 func (s *dnsStore) ProcessDNSQuery(req *dns.Msg) *dns.Msg {
 	res := new(dns.Msg)
 	res.SetReply(req)
+
+	// RECURSIVE
+	res.RecursionAvailable = true
+	if req.RecursionDesired {
+		s.HandleRecursiveQuery(req, res)
+		return res
+	}
+	// RECURSIVE
 
 	s.mu.RLock() // Lock!
 
@@ -335,6 +353,7 @@ func (s *dnsStore) readCommits(commitC <-chan *string, errorC <-chan error) {
 				if _, ok := typeMap[proposal.RRType]; ok {
 					delete(s.store[proposal.Name], proposal.RRType)
 				}
+				// put this if in the above then clause?
 				if len(typeMap) == 0 {
 					delete(s.store, proposal.Name)
 				}

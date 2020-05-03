@@ -128,6 +128,8 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 			rrType = dns.TypeA
 		case "NS":
 			rrType = dns.TypeNS
+		case "MX":
+			rrType = dns.TypeMX
 		default:
 			log.Printf("Unsupported /delete rrType: %v\n", err)
 			http.Error(w, "Unsupported /delete rrType", http.StatusBadRequest)
