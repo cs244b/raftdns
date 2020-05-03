@@ -24,6 +24,7 @@ import (
 func main() {
 	cluster := flag.String("cluster", "http://127.0.0.1:9021", "comma separated cluster peers")
 	id := flag.Int("id", 1, "node ID")
+	// PLEASE use 9121! hash_server.go assumes this port for forwarding
 	httpAPIPort := flag.Int("port", 9121, "dns HTTP API server port")
 	join := flag.Bool("join", false, "join an existing cluster")
 	// zoneFile := flag.String("zonefile", "", "Zone file provided during init")
