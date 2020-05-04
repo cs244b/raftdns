@@ -262,15 +262,18 @@ func tryDirectQuery(store *hashServerStore, batchList []batchedDNSQuestions, msg
 						}
 					}
 
+					// XXX: below is commented out, since it is possible for glue record to store on a
+					// different cluster than that of NS record.
+
 					// If no direct answer for this question, check if there is a new subzone has authority
-					if !hasAnswerForThisQuestion {
-						for _, ns := range in.Ns {
-							if strings.HasSuffix(q.Name, ns.Header().Name) { // XXX: This is not precise enough
-								hasAnswerForThisQuestion = true
-								break
-							}
-						}
-					}
+					// if !hasAnswerForThisQuestion {
+					// 	for _, ns := range in.Ns {
+					// 		if strings.HasSuffix(q.Name, ns.Header().Name) { // XXX: This is not precise enough
+					// 			hasAnswerForThisQuestion = true
+					// 			break
+					// 		}
+					// 	}
+					// }
 
 					// Otherwise, we definitely has no answer for this question. Short circuit out
 					if !hasAnswerForThisQuestion {
