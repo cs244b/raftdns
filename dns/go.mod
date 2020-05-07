@@ -3,6 +3,8 @@ module main
 go 1.14
 
 require (
+	github.com/buraksezer/consistent v0.0.0-20191006190839-693edf70fd72
+	github.com/cespare/xxhash v1.1.0
 	github.com/coreos/etcd v3.3.20+incompatible
 	github.com/coreos/go-semver v0.3.0 // indirect
 	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf // indirect

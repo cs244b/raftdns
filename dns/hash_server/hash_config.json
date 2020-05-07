@@ -1,0 +1,20 @@
+[
+  {
+    "cluster": "cluster1",
+    "members": [
+      {
+        "name": "ns1.example.com.",
+        "glue": "ns1.example.com. 3600 IN A 172.18.0.10"
+      }
+    ]
+  },
+  {
+    "cluster": "cluster2",
+    "members": [
+      {
+        "name": "ns2.example.com.",
+        "glue": "ns2.example.com. 3600 IN A 172.18.0.11"
+      }
+    ]
+  }
+]
