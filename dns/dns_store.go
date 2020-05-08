@@ -93,14 +93,14 @@ func stringsToRRs(sList []string) []dns.RR {
 }
 
 // Forward a new cache record to other machiens in the cluster
-func (s *dnsStore) whispherAddCacheRecord(rr dns.RR) {
+func (s *dnsStore) whisperAddCacheRecord(rr dns.RR) {
 
 	for i, peerAddr := range s.cluster {
 		// skip this machine
 		if i == s.id-1 {
 			continue
 		}
-		log.Printf("Whispher to %v\n", peerAddr)
+		log.Printf("Whisper to %v\n", peerAddr)
 
 		// send add cache request to other threads
 		go func(peerAddr string) {
@@ -124,7 +124,7 @@ func (s *dnsStore) addCacheRecord(rr dns.RR, whisper bool) {
 
 	if whisper {
 		// broadcast the cache record to other machines in the cluster
-		s.whispherAddCacheRecord(rr)
+		s.whisperAddCacheRecord(rr)
 	}
 
 	// check if domain name is in cache
