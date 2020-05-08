@@ -5,14 +5,13 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coreos/etcd/snap"
-
-	"fmt"
 
 	"github.com/miekg/dns"
 )
@@ -30,14 +29,14 @@ import (
 type rrType = uint16 // From RR_Header::RrType
 // XXX: this is made mapping to strings for easy snapshotting for first pass.
 // Consider making this more efficient
-type void struct{}
 type dnsRRTypeMap map[rrType][]string
-type cacheRR struct {
-	// used for TTL
-	record      string
-	createdTime time.Time
+type cacheRRInfo struct {
+	ttl        uint32
+	createTime time.Time
 }
-type cacheRRTypeMap map[rrType][]cacheRR
+
+// rrType -> rrstring (with ttl = 0) -> (ttl, createTime)
+type cacheRRTypeMap map[rrType]map[string]cacheRRInfo
 
 type dnsStore struct {
 	proposeC    chan<- string // New entry proposals is sent to here
@@ -46,14 +45,19 @@ type dnsStore struct {
 	snapshotter *snap.Snapshotter
 	cache       map[string]cacheRRTypeMap // cache for non-authoritative records
 	// XXX: optionally need a cache for glue records
+	// for sending http Cache requests
+	cluster []string
+	id      int
 }
 
-func newDNSStore(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <-chan *string, errorC <-chan error) *dnsStore {
+func newDNSStore(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <-chan *string, errorC <-chan error, cluster []string, id int) *dnsStore {
 	s := &dnsStore{
 		proposeC:    proposeC,
 		store:       make(map[string]dnsRRTypeMap),
 		snapshotter: snapshotter,
 		cache:       make(map[string]cacheRRTypeMap),
+		cluster:     cluster,
+		id:          id,
 	}
 	// Replay historical commits to in-memory store
 	s.readCommits(commitC, errorC)
@@ -88,41 +92,80 @@ func stringsToRRs(sList []string) []dns.RR {
 	return rrs
 }
 
-func validCache(record *dns.RR, cRecord *cacheRR) bool {
-	diff := time.Since(cRecord.createdTime)
-	cacheTTL := (*record).Header().Ttl
-	return float64(cacheTTL) > diff.Seconds()
+// Forward a new cache record to other machiens in the cluster
+func (s *dnsStore) whispherAddCacheRecord(rr dns.RR) {
+
+	for i, peerAddr := range s.cluster {
+		// skip this machine
+		if i == s.id-1 {
+			continue
+		}
+		log.Printf("Whispher to %v\n", peerAddr)
+
+		// send add cache request to other threads
+		go func(peerAddr string) {
+			addr := peerAddr + "/addcache"
+			req, err := http.NewRequest("PUT", addr, strings.NewReader(rr.String()))
+			if err != nil {
+				log.Println("Cannot form cache forward request")
+			}
+			req.ContentLength = int64(len(rr.String()))
+			// do not care about response
+			http.DefaultClient.Do(req)
+		}(peerAddr)
+	}
+}
+
+func (s *dnsStore) addCacheRecord(rr dns.RR, whisper bool) {
+	if rr.Header().Name == "." {
+		// ignore dummy entry from 8.8.8.8 DNS
+		return
+	}
+
+	if whisper {
+		// broadcast the cache record to other machines in the cluster
+		s.whispherAddCacheRecord(rr)
+	}
+
+	// check if domain name is in cache
+	domainName := strings.ToLower(rr.Header().Name)
+	cacheMap, hasCacheMap := s.cache[domainName]
+	if !hasCacheMap {
+		cacheMap = make(cacheRRTypeMap)
+		s.cache[domainName] = cacheMap
+	}
+
+	// check if rr type is in cache
+	rType := rr.Header().Rrtype
+	cacheRRs, hasCR := cacheMap[rType]
+	if !hasCR {
+		cacheMap[rType] = make(map[string]cacheRRInfo)
+		cacheRRs, _ = cacheMap[rType]
+	}
+
+	// use 0 tll for all cache records to generate same key for diff ttl
+	ttl := rr.Header().Ttl
+	rr.Header().Ttl = 0
+	crInfo := cacheRRInfo{ttl, time.Now()}
+	cacheRRs[rr.String()] = crInfo
+	// restore ttl
+	rr.Header().Ttl = ttl
+	log.Printf("Added cache %v\n", rr.String())
 }
 
 func (s *dnsStore) addCacheRecords(records []dns.RR) {
 	for _, rr := range records {
-		if rr.Header().Rdlength == 0 {
-			// ignore dummy entry
-			continue
-		}
-		domainName := strings.ToLower(rr.Header().Name)
-		cacheMap, hasCacheMap := s.cache[domainName]
-		if !hasCacheMap {
-			cacheMap = make(cacheRRTypeMap)
-			s.cache[domainName] = cacheMap
-		}
+		s.addCacheRecord(rr, true)
 
-		rType := rr.Header().Rrtype
-		_, hasCR := cacheMap[rType]
-		if !hasCR {
-			cacheMap[rType] = []cacheRR{}
-		}
-		// set cache record creation type
-		cacheMap[rType] = append(cacheMap[rType], cacheRR{rr.String(), time.Now()})
-		fmt.Println("Added to cache: \t", rr.String())
 	}
 }
 
+// Minimal version right now: replay resurive query
 func (s *dnsStore) HandleRecursiveQuery(req *dns.Msg, r *dns.Msg) {
 	c := new(dns.Client)
 	in, _, err := c.Exchange(req, "8.8.8.8:53")
 	if err != nil {
-		fmt.Println("Recursive failure")
+		log.Println("HandleRecursiveQuery Failed")
 		return
 	}
 	r.Answer = in.Answer
@@ -141,7 +184,7 @@ func (s *dnsStore) ProcessDNSQuery(req *dns.Msg) *dns.Msg {
 	res := new(dns.Msg)
 	res.SetReply(req)
 
-	// RECURSIVE Query
+	// Recursive Query
 	res.RecursionAvailable = true
 	if req.RecursionDesired {
 		s.HandleRecursiveQuery(req, res)
@@ -209,21 +252,22 @@ func (s *dnsStore) getCacheRecords(domainName string, qType uint16) []*dns.RR {
 	// check cache
 	cacheMap, hasCacheMap := s.cache[domainName]
 	if hasCacheMap {
-		cacheRecordList := cacheMap[qType]
-		if cacheRecordList != nil && len(cacheRecordList) != 0 {
-			i := 0
-			for _, cacheRecord := range cacheRecordList {
-				cr, err := dns.NewRR(cacheRecord.record)
-				if err == nil && validCache(&cr, &cacheRecord) {
-					// r.Answer = append(r.Answer, cr)
+		cacheInfoMap := cacheMap[qType]
+		if cacheInfoMap != nil && len(cacheInfoMap) != 0 {
+			for crString, crInfo := range cacheInfoMap {
+				cr, err := dns.NewRR(crString)
+				// check cache validity
+				timeDiff := uint32(time.Since(crInfo.createTime).Seconds())
+				// newTTL := validCache(&crInfo)
+				if err == nil && timeDiff < crInfo.ttl {
+					// restore ttl
+					cr.Header().Ttl = crInfo.ttl - timeDiff
 					cacheRecords = append(cacheRecords, &cr)
-					// keep track of valid caches
-					cacheRecordList[i] = cacheRecord
-					i++
+				} else {
+					// remove invalid cache
+					delete(cacheInfoMap, crString)
 				}
 			}
-			// remove invalid cache
-			cacheRecordList = cacheRecordList[:i]
 		}
 	}
 
@@ -256,7 +300,13 @@ func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) {
 		return
 	}
 
-	delegated := false
+	// for now: query cache if no exact match
+	cacheRRPtrs := s.getCacheRecords(domainName, qType)
+	// check cache
+	for _, cr := range cacheRRPtrs {
+		r.Answer = append(r.Answer, *cr)
+	}
+
 	// 4.3.2.3.b, border of zone
 	if hasTypeMap {
 		nsList := typeMap[dns.TypeNS]
@@ -277,49 +327,40 @@ func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) {
 
 				r.Ns = append(r.Ns, rrs...)
 				r.Extra = append(r.Extra, glueRRs...)
-				// return
-				delegated = true
+				return
 				// We have delegated to another server. Done.
 			}
 		}
 	}
 
-	if !delegated {
-		// Otherwise, try repeating the process for star
-		// 4.3.2.3.c
-		var leftLabel, rest string // dummy init s.t. avoids local scope
-		rest = domainName
-		for {
-			leftLabel, rest = popLeftmostLabel(rest)
-			if leftLabel == "" {
-				break
-			}
-			hasMatch := false
-			// Try with wildcard prefix
-			if wildcardTypeMap, ok := s.store["*."+rest]; ok {
-				wildcardRRList := wildcardTypeMap[qType]
-				for _, wildCardRRString := range wildcardRRList {
-					rr, err := dns.NewRR(wildCardRRString)
-					if err == nil {
-						hasMatch = true
-						// Spec asks us to change the owner to be w/o star
-						rr.Header().Name = domainName
-						r.Answer = append(r.Answer, rr)
-					}
+	// Otherwise, try repeating the process for star
+	// 4.3.2.3.c
+	var leftLabel, rest string // dummy init s.t. avoids local scope
+	rest = domainName
+	for {
+		leftLabel, rest = popLeftmostLabel(rest)
+		if leftLabel == "" {
+			break
+		}
+		hasMatch := false
+		// Try with wildcard prefix
+		if wildcardTypeMap, ok := s.store["*."+rest]; ok {
+			wildcardRRList := wildcardTypeMap[qType]
+			for _, wildCardRRString := range wildcardRRList {
+				rr, err := dns.NewRR(wildCardRRString)
+				if err == nil {
+					hasMatch = true
+					// Spec asks us to change the owner to be w/o star
+					rr.Header().Name = domainName
+					r.Answer = append(r.Answer, rr)
 				}
 			}
-			if hasMatch {
-				break
-			}
 		}
-		// Don't worry about *.somedomain.com for NS records, they are not supported
+		if hasMatch {
+			break
+		}
 	}
-
-	cacheRRPtrs := s.getCacheRecords(domainName, qType)
-	// check cache
-	for _, cr := range cacheRRPtrs {
-		r.Answer = append(r.Answer, *cr)
-	}
+	// Don't worry about *.somedomain.com for NS records, they are not supported
 }
 
 // 2 Propose methods.
