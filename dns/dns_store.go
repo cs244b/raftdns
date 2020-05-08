@@ -8,8 +8,11 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coreos/etcd/snap"
+
+	"fmt"
 
 	"github.com/miekg/dns"
 )
@@ -27,13 +30,21 @@ import (
 type rrType = uint16 // From RR_Header::RrType
 // XXX: this is made mapping to strings for easy snapshotting for first pass.
 // Consider making this more efficient
+type void struct{}
 type dnsRRTypeMap map[rrType][]string
+type cacheRR struct {
+	// used for TTL
+	record      string
+	createdTime time.Time
+}
+type cacheRRTypeMap map[rrType][]cacheRR
 
 type dnsStore struct {
 	proposeC    chan<- string // New entry proposals is sent to here
 	mu          sync.RWMutex
 	store       map[string]dnsRRTypeMap // ...Where actual entrys are stored
 	snapshotter *snap.Snapshotter
+	cache       map[string]cacheRRTypeMap // cache for non-authoritative records
 	// XXX: optionally need a cache for glue records
 }
 
@@ -42,6 +53,7 @@ func newDNSStore(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC 
 		proposeC:    proposeC,
 		store:       make(map[string]dnsRRTypeMap),
 		snapshotter: snapshotter,
+		cache:       make(map[string]cacheRRTypeMap),
 	}
 	// Replay historical commits to in-memory store
 	s.readCommits(commitC, errorC)
@@ -76,13 +88,50 @@ func stringsToRRs(sList []string) []dns.RR {
 	return rrs
 }
 
+func validCache(record *dns.RR, cRecord *cacheRR) bool {
+	diff := time.Since(cRecord.createdTime)
+	cacheTTL := (*record).Header().Ttl
+	return float64(cacheTTL) > diff.Seconds()
+}
+
+func (s *dnsStore) addCacheRecords(records []dns.RR) {
+	for _, rr := range records {
+		if rr.Header().Rdlength == 0 {
+			// ignore dummy entry
+			continue
+		}
+		domainName := strings.ToLower(rr.Header().Name)
+		cacheMap, hasCacheMap := s.cache[domainName]
+		if !hasCacheMap {
+			cacheMap = make(cacheRRTypeMap)
+			s.cache[domainName] = cacheMap
+		}
+
+		rType := rr.Header().Rrtype
+		_, hasCR := cacheMap[rType]
+		if !hasCR {
+			cacheMap[rType] = []cacheRR{}
+		}
+		// set cache record creation type
+		cacheMap[rType] = append(cacheMap[rType], cacheRR{rr.String(), time.Now()})
+		fmt.Println("Added to cache: \t", rr.String())
+	}
+}
+
 func (s *dnsStore) HandleRecursiveQuery(req *dns.Msg, r *dns.Msg) {
 	c := new(dns.Client)
 	in, _, err := c.Exchange(req, "8.8.8.8:53")
 	if err != nil {
-		log.Fatal("Recursive failure")
+		fmt.Println("Recursive failure")
+		return
 	}
-	*r = *in
+	r.Answer = in.Answer
+	r.Ns = in.Ns
+	r.Extra = in.Extra
+	// cache the results
+	s.addCacheRecords(r.Answer)
+	s.addCacheRecords(r.Ns)
+	s.addCacheRecords(r.Extra)
 	return
 }
 
@@ -92,13 +141,12 @@ func (s *dnsStore) ProcessDNSQuery(req *dns.Msg) *dns.Msg {
 	res := new(dns.Msg)
 	res.SetReply(req)
 
-	// RECURSIVE
+	// RECURSIVE Query
 	res.RecursionAvailable = true
 	if req.RecursionDesired {
 		s.HandleRecursiveQuery(req, res)
 		return res
 	}
-	// RECURSIVE
 
 	s.mu.RLock() // Lock!
 
@@ -156,6 +204,32 @@ func (s *dnsStore) getGlueRecords(nsName string) []*dns.RR {
 	return glueRecords
 }
 
+func (s *dnsStore) getCacheRecords(domainName string, qType uint16) []*dns.RR {
+	cacheRecords := []*dns.RR{}
+	// check cache
+	cacheMap, hasCacheMap := s.cache[domainName]
+	if hasCacheMap {
+		cacheRecordList := cacheMap[qType]
+		if cacheRecordList != nil && len(cacheRecordList) != 0 {
+			i := 0
+			for _, cacheRecord := range cacheRecordList {
+				cr, err := dns.NewRR(cacheRecord.record)
+				if err == nil && validCache(&cr, &cacheRecord) {
+					// r.Answer = append(r.Answer, cr)
+					cacheRecords = append(cacheRecords, &cr)
+					// keep track of valid caches
+					cacheRecordList[i] = cacheRecord
+					i++
+				}
+			}
+			// remove invalid cache
+			cacheRecordList = cacheRecordList[:i]
+		}
+	}
+
+	return cacheRecords
+}
+
 // See rfc1034 4.3.2
 // TODO: ensure SOA
 func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) {
@@ -182,6 +256,7 @@ func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) {
 		return
 	}
 
+	delegated := false
 	// 4.3.2.3.b, border of zone
 	if hasTypeMap {
 		nsList := typeMap[dns.TypeNS]
@@ -202,39 +277,49 @@ func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) {
 
 				r.Ns = append(r.Ns, rrs...)
 				r.Extra = append(r.Extra, glueRRs...)
-				return // We have delegated to another server. Done.
+				// return
+				delegated = true
+				// We have delegated to another server. Done.
 			}
 		}
 	}
 
-	// Otherwise, try repeating the process for star
-	// 4.3.2.3.c
-	var leftLabel, rest string // dummy init s.t. avoids local scope
-	rest = domainName
-	for {
-		leftLabel, rest = popLeftmostLabel(rest)
-		if leftLabel == "" {
-			break
-		}
-		hasMatch := false
-		// Try with wildcard prefix
-		if wildcardTypeMap, ok := s.store["*."+rest]; ok {
-			wildcardRRList := wildcardTypeMap[qType]
-			for _, wildCardRRString := range wildcardRRList {
-				rr, err := dns.NewRR(wildCardRRString)
-				if err == nil {
-					hasMatch = true
-					// Spec asks us to change the owner to be w/o star
-					rr.Header().Name = domainName
-					r.Answer = append(r.Answer, rr)
+	if !delegated {
+		// Otherwise, try repeating the process for star
+		// 4.3.2.3.c
+		var leftLabel, rest string // dummy init s.t. avoids local scope
+		rest = domainName
+		for {
+			leftLabel, rest = popLeftmostLabel(rest)
+			if leftLabel == "" {
+				break
+			}
+			hasMatch := false
+			// Try with wildcard prefix
+			if wildcardTypeMap, ok := s.store["*."+rest]; ok {
+				wildcardRRList := wildcardTypeMap[qType]
+				for _, wildCardRRString := range wildcardRRList {
+					rr, err := dns.NewRR(wildCardRRString)
+					if err == nil {
+						hasMatch = true
+						// Spec asks us to change the owner to be w/o star
+						rr.Header().Name = domainName
+						r.Answer = append(r.Answer, rr)
+					}
 				}
 			}
+			if hasMatch {
+				break
+			}
 		}
-		if hasMatch {
-			break
-		}
+		// Don't worry about *.somedomain.com for NS records, they are not supported
 	}
-	// Don't worry about *.somedomain.com for NS records, they are not supported
+
+	cacheRRPtrs := s.getCacheRecords(domainName, qType)
+	// check cache
+	for _, cr := range cacheRRPtrs {
+		r.Answer = append(r.Answer, *cr)
+	}
 }
 
 // 2 Propose methods.
