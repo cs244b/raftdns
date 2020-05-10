@@ -16,6 +16,8 @@ package main
 
 import (
 	"flag"
+	"log"
+	"strconv"
 	"strings"
 
 	"github.com/coreos/etcd/raft/raftpb"
@@ -40,7 +42,14 @@ func main() {
 	getSnapshot := func() ([]byte, error) { return dnsStore.getSnapshot() }
 	commitC, errorC, snapshotterReady := newRaftNode(*id, strings.Split(*cluster, ","), *join, getSnapshot, proposeC, confChangeC)
 
-	dnsStore = newDNSStore(<-snapshotterReady, proposeC, commitC, errorC)
+	clusterIP := []string{}
+	for i, ip := range strings.Split(*cluster, ",") {
+		// !Careful, hardcoded length
+		clusterIP = append(clusterIP, ip[:len(ip)-5]+strconv.Itoa(*httpAPIPort))
+		log.Printf("cluster ip %v\n", clusterIP[i])
+	}
+
+	dnsStore = newDNSStore(<-snapshotterReady, proposeC, commitC, errorC, clusterIP, *id)
 
 	// For dig queries
 	serveUDPAPI(dnsStore)

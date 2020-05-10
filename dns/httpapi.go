@@ -128,6 +128,8 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 			rrType = dns.TypeA
 		case "NS":
 			rrType = dns.TypeNS
+		case "MX":
+			rrType = dns.TypeMX
 		default:
 			log.Printf("Unsupported /delete rrType: %v\n", err)
 			http.Error(w, "Unsupported /delete rrType", http.StatusBadRequest)
@@ -135,6 +137,35 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 		}
 
 		store.ProposeDeleteRRs(req.Name, rrType)
+		// Optimistic-- no waiting for ack from raft. Value is not yet
+		// committed so a subsequent GET on the key may return old value
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	router.HandleFunc("/addcache", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("addcache request")
+		if r.Method != "PUT" {
+			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
+			return
+		}
+
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("Cannot read /add body: %v\n", err)
+			http.Error(w, "Bad PUT body", http.StatusBadRequest)
+			return
+		}
+		rrString := string(body)
+
+		rr, err := dns.NewRR(rrString)
+		if err != nil {
+			log.Println("Bad cache RR request")
+			http.Error(w, "Bad RR request", http.StatusBadRequest)
+			return
+		}
+		// do not whisper again
+		log.Printf("add cache record from whisper %v\n", rr.String())
+		store.addCacheRecord(rr, false)
 		// Optimistic-- no waiting for ack from raft. Value is not yet
 		// committed so a subsequent GET on the key may return old value
 		w.WriteHeader(http.StatusNoContent)
