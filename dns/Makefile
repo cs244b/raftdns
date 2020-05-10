@@ -39,7 +39,6 @@ cluster:
 	./$(NAME) --id 2 --cluster $(CLUSTER) --port 22380 &
 	./$(NAME) --id 3 --cluster $(CLUSTER) --port 32380 &
 
-
 ##################
 ##### DOCKER #####
 ##################
@@ -69,6 +68,7 @@ docker-test:
 	curl -d "google.com. IN A 10.0.0.5" -X PUT -L http://127.0.0.1:$(LOCAL-POST)/add
 	dig @127.0.0.1 -p $(LOCAL-UDP) google.com A
 
+# open a shell in a cotainer running our dns docker image
 docker-shell:
 	docker run --ip 172.17.0.5 -it $(NAME):0.1 /bin/bash
 
@@ -87,6 +87,7 @@ DOCKER-CLUST:=http://$(IP-1):12379,http://$(IP-2):22379,http://$(IP-3):32379
 # containers cannot communicate with one another
 # 	already is on bridge topology, and it has exposed ports
 docker-cluster:
+	echo "docker cluster is currently broken"
 	docker run --ip $(IP-1) \
 		--publish 8001:12380 --publish 8011:53/udp	--expose 12379\
 		$(NAME):0.1 ./$(NAME) --id 1 --cluster $(DOCKER-CLUST) --port 12380 &
@@ -97,9 +98,8 @@ docker-cluster:
 		--publish 8003:32380 --publish 8013:53/udp	--expose 32379\
 		$(NAME):0.1 ./$(NAME) --id 3 --cluster $(DOCKER-CLUST) --port 32380 &
 
-
+# Inspecrt a docker container for its IP address
 CNTNR-NAME:=container
-
 docker-inspect:
 	docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $(CNTNR_NAME)
 
