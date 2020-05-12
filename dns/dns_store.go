@@ -184,21 +184,34 @@ func (s *dnsStore) ProcessDNSQuery(req *dns.Msg) *dns.Msg {
 	res := new(dns.Msg)
 	res.SetReply(req)
 
-	// Recursive Query
-	res.RecursionAvailable = true
-	if req.RecursionDesired {
-		s.HandleRecursiveQuery(req, res)
-		return res
-	}
-
 	s.mu.RLock() // Lock!
 
+	unhandledQuestions := []dns.Question{}
 	// We ignore Qclass for now, since we only care about IN.
 	for _, q := range req.Question {
-		s.HandleSingleQuestion(q.Name, q.Qtype, res)
+		canHandleCurrentQuestion := s.HandleSingleQuestion(q.Name, q.Qtype, res)
+		if !canHandleCurrentQuestion {
+			unhandledQuestions = append(unhandledQuestions, q)
+		}
 	}
 
 	s.mu.RUnlock()
+
+	// Recursive Query
+	res.RecursionAvailable = true
+	if req.RecursionDesired && len(unhandledQuestions) > 0 {
+		// Create req for recursive with only the subset of unhandled questions
+		reqRec := req.Copy()
+		reqRec.Question = unhandledQuestions
+		// Create a new recursive query for unhandled questions
+		resRec := new(dns.Msg)
+		s.HandleRecursiveQuery(reqRec, resRec)
+		// Merge results of local and recursive
+		res.Answer = append(res.Answer, resRec.Answer...)
+		res.Extra = append(res.Extra, resRec.Extra...)
+		res.Ns = append(res.Ns, resRec.Ns...)
+	}
+
 	return res
 }
 
@@ -275,8 +288,8 @@ func (s *dnsStore) getCacheRecords(domainName string, qType uint16) []*dns.RR {
 }
 
 // See rfc1034 4.3.2
-// TODO: ensure SOA
-func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) {
+// Returns whether this single question can be handled locally
+func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) bool {
 	domainName := strings.ToLower(name)
 	hasPreciseMatch := false
 
@@ -297,7 +310,7 @@ func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) {
 
 	// Has precise match, no need to scan further
 	if hasPreciseMatch {
-		return
+		return true
 	}
 
 	// for now: query cache if no exact match
@@ -305,6 +318,9 @@ func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) {
 	// check cache
 	for _, cr := range cacheRRPtrs {
 		r.Answer = append(r.Answer, *cr)
+	}
+	if len(cacheRRPtrs) > 0 {
+		return true
 	}
 
 	// 4.3.2.3.b, border of zone
@@ -327,7 +343,7 @@ func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) {
 
 				r.Ns = append(r.Ns, rrs...)
 				r.Extra = append(r.Extra, glueRRs...)
-				return
+				return false
 				// We have delegated to another server. Done.
 			}
 		}
@@ -340,7 +356,8 @@ func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) {
 	for {
 		leftLabel, rest = popLeftmostLabel(rest)
 		if leftLabel == "" {
-			break
+			return false
+			// break
 		}
 		hasMatch := false
 		// Try with wildcard prefix
@@ -357,7 +374,8 @@ func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) {
 			}
 		}
 		if hasMatch {
-			break
+			return true
+			// break
 		}
 	}
 	// Don't worry about *.somedomain.com for NS records, they are not supported
