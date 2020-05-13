@@ -43,10 +43,10 @@ cluster:
 ##### DOCKER #####
 ##################
 
-IP:=172.30.100.104 # IP address to run container on
-LOCAL-HOST:=127.0.0.1 # local host
-LOCAL-UDP:=8001 # local port to bind to udp port of dns server
-LOCAL-POST:=8000 # local port to bind to tcp port of dns server
+IP:=172.30.100.104# IP address to run container on
+LOCAL-HOST:=127.0.0.1# local host
+LOCAL-UDP:=8001# local port to bind to udp port of dns server
+LOCAL-POST:=8000# local port to bind to tcp port of dns server
 
 # HOST-PORT:=8000
 # CNTNR-PORT:=12380
