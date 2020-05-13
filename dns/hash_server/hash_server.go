@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,11 +39,13 @@ func (h hasher) Sum64(data []byte) uint64 {
 type nsInfo struct {
 	nsName     string
 	glueRecord dns.RR
+	aliveSince time.Time    // Mark since when the server is considered alive (will be a timestamp in the future if server is found to be down during polling)
+	aliveMutex sync.RWMutex // Mutex protecting aliveSince
 }
 
 type clusterInfo struct {
 	token   clusterToken // Each participant cluster has a unique token for consistent hashing choice
-	members []nsInfo     // Each participant cluster has >= 3 members in a normal Raft design. Any one of them can handle r/w request
+	members []*nsInfo    // Each participant cluster has >= 3 members in a normal Raft design. Any one of them can handle r/w request
 }
 
 type hashServerStore struct {
@@ -76,8 +79,9 @@ func getIPFromARecord(rr dns.RR) net.IP {
 func (c *jsonClusterInfo) intoClusterInfo() clusterInfo {
 	ci := clusterInfo{
 		token:   clusterToken(c.ClusterToken),
-		members: make([]nsInfo, 0),
+		members: make([]*nsInfo, 0),
 	}
+	now := time.Now()
 	for _, m := range c.Members {
 		glueRecord, err := dns.NewRR(m.GlueRecord)
 		if err != nil {
@@ -86,8 +90,9 @@ func (c *jsonClusterInfo) intoClusterInfo() clusterInfo {
 		mi := nsInfo{
 			nsName:     m.NsName,
 			glueRecord: glueRecord,
+			aliveSince: now,
 		}
-		ci.members = append(ci.members, mi)
+		ci.members = append(ci.members, &mi)
 	}
 	return ci
 }
@@ -218,13 +223,33 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 }
 
 type batchedDNSQuestions struct {
-	token          clusterToken    // token of cluster that should handle these questions
-	chosenServerIP net.IP          // IP address of a single member of cluster where the query will be forwarded
-	questions      *[]dns.Question // Questions that should go to the same single cluster
+	token         clusterToken    // token of cluster that should handle these questions
+	chosenServers []*nsInfo       // IP address of a single member of cluster where the query will be forwarded
+	questions     *[]dns.Question // Questions that should go to the same single cluster
 }
 
 func keyToClusterToken(m consistent.Member) clusterToken {
 	return clusterToken(m.String())
+}
+
+func sendDNSMsgUntilSuccess(m *dns.Msg, servers []*nsInfo) (*dns.Msg, error) {
+	c := dns.Client{
+		Timeout: time.Millisecond * 500, //
+	}
+	var in *dns.Msg
+	var err error
+	for _, s := range servers {
+		serverIP := getIPFromARecord(s.glueRecord)
+		in, _, err = c.Exchange(m, serverIP.String()+":53")
+		if err == nil {
+			return in, nil
+		}
+		// Otherwise server not reachable, mark it to be not alive for the next 0.5 second
+		s.aliveMutex.Lock() // Write lock
+		s.aliveSince = time.Now().Add(500 * time.Millisecond)
+		s.aliveMutex.Unlock()
+	}
+	return in, err
 }
 
 // Returns true if through direct query we have all answers. Otherwise return false
@@ -241,9 +266,11 @@ func tryDirectQuery(store *hashServerStore, batchList []batchedDNSQuestions, msg
 			defer wg.Done()
 
 			m := new(dns.Msg)
+			m.RecursionDesired = true // Also seek recursive. See comment below for behavior implications
 			m.Question = *batch.questions
 
-			in, err := dns.Exchange(m, batch.chosenServerIP.String()+":53") // XXX: make UDP reliable
+			// This will try all servers one by one on preference order until depletion of the list
+			in, err := sendDNSMsgUntilSuccess(m, batch.chosenServers)
 			if err != nil {
 				answerLock.Lock()
 				hasAllAnswers = false
@@ -308,16 +335,19 @@ func tryBroadcastAndMerge(store *hashServerStore, msg *dns.Msg) {
 	var answerLock sync.Mutex // protects msg
 
 	for _, cluster := range store.clusters {
-		randomMember := cluster.members[rand.Intn(len(cluster.members))]
-		randomMemberIP := getIPFromARecord(randomMember.glueRecord)
+		chosenServers := getPreferredServerIPsInOrder(cluster.members)
 		wg.Add(1)
 		go func(wg *sync.WaitGroup) {
 			defer wg.Done()
 
 			m := new(dns.Msg)
+			// Recursion is deliberately not done here.
+			// With recursion enabled, if record is not present but is a valid DNS query
+			// on an existing domain, tryDirectQuery will already have the answer.
 			m.Question = msg.Question
 
-			in, err := dns.Exchange(m, randomMemberIP.String()+":53") // XXX: make UDP reliable
+			// This will try all servers one by one on preference order until depletion of the list
+			in, err := sendDNSMsgUntilSuccess(m, chosenServers)
 			if err != nil {
 				answerLock.Lock()
 				msg.Answer = append(msg.Answer, in.Answer...)
@@ -329,6 +359,36 @@ func tryBroadcastAndMerge(store *hashServerStore, msg *dns.Msg) {
 	}
 
 	wg.Wait()
+}
+
+// We prefer alive servers to server with previous unresponsiveness.
+func getPreferredServerIPsInOrder(members []*nsInfo) []*nsInfo {
+	var aliveServers []*nsInfo
+	var deadServers []*nsInfo // servers that are considered not yet alive.
+	now := time.Now()
+	for _, ni := range members {
+		ni.aliveMutex.RLock() // Read Lock
+		if ni.aliveSince.Before(now) {
+			aliveServers = append(aliveServers, ni)
+		} else {
+			deadServers = append(deadServers, ni)
+		}
+		ni.aliveMutex.RUnlock()
+	}
+	// Randomly shuffle alive servers (to distribute load, since we try servers from the start)
+	rand.Shuffle(len(aliveServers), func(i, j int) {
+		aliveServers[i], aliveServers[j] = aliveServers[j], aliveServers[i]
+	})
+	// Sort dead servers by when we treat them as alive again
+	sort.Slice(deadServers, func(i, j int) bool {
+		deadServers[i].aliveMutex.RLock() // Read Lock
+		deadServers[j].aliveMutex.RLock()
+		defer deadServers[i].aliveMutex.RUnlock()
+		defer deadServers[j].aliveMutex.RUnlock()
+		return deadServers[i].aliveSince.Before(deadServers[j].aliveSince)
+	})
+	// Append deadServers after alive servers, such that they are tried only after all alive are tried
+	return append(aliveServers, deadServers...)
 }
 
 func serveHashServerUDPAPI(store *hashServerStore) {
@@ -346,12 +406,11 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 			if _, ok := batchMap[token]; !ok { // not exist
 				cluster := store.clusters[token]
 				// Select a random member to query
-				randomMember := cluster.members[rand.Intn(len(cluster.members))]
-				randomMemberIP := getIPFromARecord(randomMember.glueRecord)
+				chosenServers := getPreferredServerIPsInOrder(cluster.members)
 				batchMap[token] = batchedDNSQuestions{
-					token:          token,
-					chosenServerIP: randomMemberIP,
-					questions:      &[]dns.Question{},
+					token:         token,
+					chosenServers: chosenServers,
+					questions:     &[]dns.Question{},
 				}
 			}
 			*(batchMap[token].questions) = append(*(batchMap[token].questions), q)
