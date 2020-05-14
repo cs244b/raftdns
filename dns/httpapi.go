@@ -14,8 +14,8 @@ import (
 )
 
 func checkValidRRString(s string) bool {
-	_, err := dns.NewRR(s)
-	return err == nil
+	rr, err := dns.NewRR(s)
+	return err == nil && rr != nil
 }
 
 // func (h *dnsHTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -158,7 +158,7 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 		rrString := string(body)
 
 		rr, err := dns.NewRR(rrString)
-		if err != nil {
+		if err != nil || rr == nil {
 			log.Println("Bad cache RR request")
 			http.Error(w, "Bad RR request", http.StatusBadRequest)
 			return
