@@ -7,7 +7,9 @@
 # 	- DOCKER provides commands to run the server in a docker container
 
 NAME:=dns_server
-ARGS-SINGLE:=--cluster http://127.0.0.1:12379 --port 12380
+PUT-PORT:=12380#port to curl commands to
+COMM-PORT:=12379#port for cluster communication
+ARGS-SINGLE:=--cluster http://127.0.0.1:$(COMM-PORT) --port $(PUT-PORT)
 
 #################
 ##### LOCAL #####
@@ -29,7 +31,7 @@ stop:
 
 # simple test of adding A record and digging for it
 test:
-	curl -d "google.com. IN A 10.0.0.1" -X PUT -L http://127.0.0.1:12380/add
+	curl -d "google.com. IN A 10.0.0.1" -X PUT -L http://127.0.0.1:$(PUT-PORT)/add
 	dig @127.0.0.1 google.com A
 
 CLUSTER:=http://127.0.0.1:12379,http://127.0.0.1:22379,http://127.0.0.1:32379
@@ -46,57 +48,80 @@ cluster:
 IP:=172.30.100.104# IP address to run container on
 LOCAL-HOST:=127.0.0.1# local host
 LOCAL-UDP:=8001# local port to bind to udp port of dns server
-LOCAL-POST:=8000# local port to bind to tcp port of dns server
-
-# HOST-PORT:=8000
-# CNTNR-PORT:=12380
+LOCAL-PUT:=8000# local port to bind to tcp port of dns server
 
 docker-build:
 	docker build --tag $(NAME):0.1 .
 
 # runs dns server at ip $(IP)
-#		binds $(LOCAL-POST) to port to send PUT requests
+#		binds $(LOCAL-PUT) to port to send PUT requests
 #		binds $(LOCAL-UDP) to port to send GET request (dig commands) dig 
 docker-run:
 	docker run --ip $(IP) \
-		--publish $(LOCAL-POST):12380 --publish $(LOCAL-UDP):53/udp \
-		--expose 53/udp --expose 12380 --expose 12379 \
+		--publish $(LOCAL-PUT):$(PUT-PORT) --publish $(LOCAL-UDP):53/udp \
+		--expose 53/udp --expose $(PUT-PORT) --expose $(COMM-PORT) \
 		$(NAME):0.1 ./$(NAME) --id 1 $(ARGS-SINGLE)
 
 # run a simple test of the running server with `curl` and `dig`
 docker-test:
-	curl -d "google.com. IN A 10.0.0.5" -X PUT -L http://127.0.0.1:$(LOCAL-POST)/add
+	curl -d "google.com. IN A 10.0.0.5" -X PUT -L http://127.0.0.1:$(LOCAL-PUT)/add
 	dig @127.0.0.1 -p $(LOCAL-UDP) google.com A
 
 # open a shell in a cotainer running our dns docker image
 docker-shell:
 	docker run --ip 172.17.0.5 -it $(NAME):0.1 /bin/bash
 
-IP-1:=172.30.100.104
-IP-2:=172.30.100.204
-IP-3:=172.30.100.304
-DOCKER-CLUST:=http://$(IP-1):12379,http://$(IP-2):22379,http://$(IP-3):32379
+DNSNET-IP:=172.28.0.0/26#ip of dnsnet 
+IP-1:=172.28.0.11#ip of node 1
+IP-2:=172.28.0.22#ip of node 2
+IP-3:=172.28.0.33#ip of node 3
+DOCKER-CLUST:=http://$(IP-1):$(COMM-PORT),http://$(IP-2):$(COMM-PORT),http://$(IP-3):$(COMM-PORT)
 
-### Unnecessary
-# docker-build-cluster:
-# 	docker build --tag $(NAME):1.1 .
-# 	docker build --tag $(NAME):2.1 .
-# 	docker build --tag $(NAME):3.1 .
+docker-cluster-build:
+	docker network create -d bridge --subnet=$(DNSNET-IP) dnsnet
 
-# TODO Broken
 # containers cannot communicate with one another
 # 	already is on bridge topology, and it has exposed ports
+
+docker-cluster-1:
+	docker run --net dnsnet --ip $(IP-1) \
+	 	--expose $(PUT-PORT) --expose 53/udp	--expose $(COMM-PORT)\
+		$(NAME):0.1 ./$(NAME) --id 1 --cluster $(DOCKER-CLUST) --port $(PUT-PORT)
+
+docker-cluster-2:
+	docker run --net dnsnet --ip $(IP-2) \
+	 	--expose $(PUT-PORT) --expose 53/udp	--expose $(COMM-PORT)\
+		$(NAME):0.1 ./$(NAME) --id 2 --cluster $(DOCKER-CLUST) --port $(PUT-PORT)
+
+docker-cluster-3:
+	docker run --net dnsnet --ip $(IP-3) \
+	 	--expose $(PUT-PORT) --expose 53/udp	--expose $(COMM-PORT)\
+		$(NAME):0.1 ./$(NAME) --id 3 --cluster $(DOCKER-CLUST) --port $(PUT-PORT)
+
 docker-cluster:
-	echo "docker cluster is currently broken"
-	docker run --ip $(IP-1) \
-		--publish 8001:12380 --publish 8011:53/udp	--expose 12379\
-		$(NAME):0.1 ./$(NAME) --id 1 --cluster $(DOCKER-CLUST) --port 12380 &
-	docker run --ip $(IP-2) \
-		--publish 8002:22380 --publish 8012:53/udp	--expose 22379\
-		$(NAME):0.1 ./$(NAME) --id 2 --cluster $(DOCKER-CLUST) --port 22380 &
-	docker run --ip $(IP-3) \
-		--publish 8003:32380 --publish 8013:53/udp	--expose 32379\
-		$(NAME):0.1 ./$(NAME) --id 3 --cluster $(DOCKER-CLUST) --port 32380 &
+	make docker-cluster-1 &
+	make docker-cluster-2 &
+	make docker-cluster-3 &
+
+docker-cluster-test-script:
+	echo "testing node 1"
+	curl -d "example.com. IN A 10.0.0.1" -XPUT -L http://$(IP-1):$(PUT-PORT)/add
+	dig @$(IP-2) example.com
+	echo "testing node 2"
+	curl -d "example.com. IN A 10.0.0.2" -XPUT -L http://$(IP-2):$(PUT-PORT)/add
+	dig @$(IP-2) example.com
+	echo "testing node 3"
+	curl -d "example.com. IN A 10.0.0.3" -XPUT -L http://$(IP-3):$(PUT-PORT)/add
+	dig @$(IP-3) example.com
+
+IP-TEST:=172.28.0.44
+
+docker-cluster-test:
+	docker run --net dnsnet --ip $(IP-TEST) -it $(NAME):0.1 \
+		make docker-cluster-test-script
+
+docker-cluster-shell:
+	docker run --net dnsnet --ip $(IP-TEST) -it $(NAME):0.1 /bin/bash
 
 # Inspecrt a docker container for its IP address
 CNTNR-NAME:=container
