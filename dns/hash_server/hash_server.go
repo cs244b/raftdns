@@ -84,7 +84,7 @@ func (c *jsonClusterInfo) intoClusterInfo() clusterInfo {
 	now := time.Now()
 	for _, m := range c.Members {
 		glueRecord, err := dns.NewRR(m.GlueRecord)
-		if err != nil {
+		if err != nil || glueRecord == nil {
 			continue
 		}
 		mi := nsInfo{
@@ -151,7 +151,7 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 		rrString := string(body)
 
 		rr, err := dns.NewRR(rrString)
-		if err != nil {
+		if err != nil || rr == nil {
 			log.Println("Bad RR request")
 			http.Error(w, "Bad RR request", http.StatusBadRequest)
 			return

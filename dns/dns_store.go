@@ -85,7 +85,7 @@ func stringsToRRs(sList []string) []dns.RR {
 	rrs := []dns.RR{}
 	for _, s := range sList {
 		rr, err := dns.NewRR(s)
-		if err == nil {
+		if err == nil && rr != nil {
 			rrs = append(rrs, rr)
 		}
 	}
@@ -223,7 +223,7 @@ func (s *dnsStore) getGlueRecords(nsName string) []*dns.RR {
 		if glueARecords, ok := typeMap[dns.TypeA]; ok {
 			for _, glueRecordString := range glueARecords {
 				rr, err := dns.NewRR(glueRecordString)
-				if err == nil {
+				if err == nil && rr != nil {
 					hasPreciseMatch = true
 					glueRecords = append(glueRecords, &rr)
 				}
@@ -247,7 +247,7 @@ func (s *dnsStore) getGlueRecords(nsName string) []*dns.RR {
 			wildcardGlueRecordList := wildcardTypeMap[dns.TypeA]
 			for _, wildCardGlueRecordString := range wildcardGlueRecordList {
 				rr, err := dns.NewRR(wildCardGlueRecordString)
-				if err == nil {
+				if err == nil && rr != nil {
 					hasMatch = true
 					glueRecords = append(glueRecords, &rr)
 				}
@@ -272,7 +272,7 @@ func (s *dnsStore) getCacheRecords(domainName string, qType uint16) []*dns.RR {
 				// check cache validity
 				timeDiff := uint32(time.Since(crInfo.createTime).Seconds())
 				// newTTL := validCache(&crInfo)
-				if err == nil && timeDiff < crInfo.ttl {
+				if err == nil && cr != nil && timeDiff < crInfo.ttl {
 					// restore ttl
 					cr.Header().Ttl = crInfo.ttl - timeDiff
 					cacheRecords = append(cacheRecords, &cr)
@@ -300,7 +300,7 @@ func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) b
 		if rrStringList != nil && len(rrStringList) != 0 {
 			for _, rrString := range rrStringList {
 				rr, err := dns.NewRR(rrString)
-				if err == nil {
+				if err == nil && rr != nil {
 					hasPreciseMatch = true // We have a precise match if we push entry
 					r.Answer = append(r.Answer, rr)
 				}
@@ -365,7 +365,7 @@ func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) b
 			wildcardRRList := wildcardTypeMap[qType]
 			for _, wildCardRRString := range wildcardRRList {
 				rr, err := dns.NewRR(wildCardRRString)
-				if err == nil {
+				if err == nil && rr != nil {
 					hasMatch = true
 					// Spec asks us to change the owner to be w/o star
 					rr.Header().Name = domainName
@@ -486,7 +486,7 @@ func (s *dnsStore) readCommits(commitC <-chan *string, errorC <-chan error) {
 		switch proposal.ProposalType {
 		case AddRR:
 			rr, err := dns.NewRR(proposal.RRString)
-			if err == nil {
+			if err == nil && rr != nil {
 				s.mu.Lock()
 				s.insertRR(rr)
 				s.mu.Unlock()
