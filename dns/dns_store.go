@@ -71,13 +71,14 @@ func (s *dnsStore) lookupNameMap(domainName string) (dnsRRTypeMap, bool) {
 	return typeMap, hasTypeMap
 }
 
+
 func (s *dnsStore) rlockStore() {
 	s.mu.RLock()
 }
 
 func (s *dnsStore) runlockStore() {
 	s.mu.RUnlock()
-}
+
 
 // Forward a new cache record to other machiens in the cluster
 func (s *dnsStore) whisperAddCacheRecord(rr dns.RR) {
@@ -155,7 +156,7 @@ func (s *dnsStore) getGlueRecords(nsName string) []*dns.RR {
 		if glueARecords, ok := typeMap[dns.TypeA]; ok {
 			for _, glueRecordString := range glueARecords {
 				rr, err := dns.NewRR(glueRecordString)
-				if err == nil {
+				if err == nil && rr != nil {
 					hasPreciseMatch = true
 					glueRecords = append(glueRecords, &rr)
 				}
@@ -179,7 +180,7 @@ func (s *dnsStore) getGlueRecords(nsName string) []*dns.RR {
 			wildcardGlueRecordList := wildcardTypeMap[dns.TypeA]
 			for _, wildCardGlueRecordString := range wildcardGlueRecordList {
 				rr, err := dns.NewRR(wildCardGlueRecordString)
-				if err == nil {
+				if err == nil && rr != nil {
 					hasMatch = true
 					glueRecords = append(glueRecords, &rr)
 				}
@@ -204,7 +205,7 @@ func (s *dnsStore) getCacheRecords(domainName string, qType uint16) []*dns.RR {
 				// check cache validity
 				timeDiff := uint32(time.Since(crInfo.createTime).Seconds())
 				// newTTL := validCache(&crInfo)
-				if err == nil && timeDiff < crInfo.ttl {
+				if err == nil && cr != nil && timeDiff < crInfo.ttl {
 					// restore ttl
 					cr.Header().Ttl = crInfo.ttl - timeDiff
 					cacheRecords = append(cacheRecords, &cr)
@@ -324,7 +325,7 @@ func (s *dnsStore) readCommits(commitC <-chan *string, errorC <-chan error) {
 		switch proposal.ProposalType {
 		case AddRR:
 			rr, err := dns.NewRR(proposal.RRString)
-			if err == nil {
+			if err == nil && rr != nil {
 				s.mu.Lock()
 				s.insertRR(rr)
 				s.mu.Unlock()
