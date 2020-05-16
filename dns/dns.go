@@ -62,7 +62,7 @@ func ProcessDNSQuery(req *dns.Msg, s *dnsStore) *dns.Msg {
 	unhandledQuestions := []dns.Question{}
 	// We ignore Qclass for now, since we only care about IN.
 	for _, q := range req.Question {
-		canHandleCurrentQuestion := s.HandleSingleQuestion(q.Name, q.Qtype, res)
+		canHandleCurrentQuestion := HandleSingleQuestion(q.Name, q.Qtype, res, s)
 		if !canHandleCurrentQuestion {
 			unhandledQuestions = append(unhandledQuestions, q)
 		}

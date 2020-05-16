@@ -71,14 +71,13 @@ func (s *dnsStore) lookupNameMap(domainName string) (dnsRRTypeMap, bool) {
 	return typeMap, hasTypeMap
 }
 
-
 func (s *dnsStore) rlockStore() {
 	s.mu.RLock()
 }
 
 func (s *dnsStore) runlockStore() {
 	s.mu.RUnlock()
-
+}
 
 // Forward a new cache record to other machiens in the cluster
 func (s *dnsStore) whisperAddCacheRecord(rr dns.RR) {
