@@ -133,8 +133,11 @@ func HandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *dnsStore) bo
 			if len(rrs) > 0 {
 				// Try append glue record if exist
 				glueRRPtrs := []*dns.RR{}
-				for _, nsRR := range rrs {
-					glueRRPtrs = append(glueRRPtrs, s.getGlueRecords(nsRR.Header().Name)...)
+				for _, rr := range rrs {
+					nsRR, ok := rr.(*dns.NS)
+					if ok {
+						glueRRPtrs = append(glueRRPtrs, s.getGlueRecords(nsRR.Ns)...)
+					}
 				}
 
 				glueRRs := []dns.RR{}
