@@ -184,7 +184,7 @@ func HandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *dnsStore) bo
 
 // Implicitly at port 53
 func serveUDPAPI(store *dnsStore) {
-	server := &dns.Server{Addr: ":53", Net: "udp"}
+	server := &dns.Server{Addr: "0.0.0.0:53", Net: "udp"}
 	go server.ListenAndServe()
 	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
 		res := ProcessDNSQuery(r, store)

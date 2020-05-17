@@ -392,7 +392,7 @@ func getPreferredServerIPsInOrder(members []*nsInfo) []*nsInfo {
 }
 
 func serveHashServerUDPAPI(store *hashServerStore) {
-	server := &dns.Server{Addr: ":53", Net: "udp"}
+	server := &dns.Server{Addr: "0.0.0.0:53", Net: "udp"}
 	go server.ListenAndServe()
 	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
 		// HashServer has no choice but to make the request on behalf of the client
