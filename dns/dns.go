@@ -107,6 +107,22 @@ func HandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *dnsStore) bo
 				}
 			}
 		}
+
+		// handle CNAME record
+		if !hasPreciseMatch && qType != dns.TypeCNAME {
+			cnameList := typeMap[dns.TypeCNAME]
+			if cnameList != nil && len(cnameList) != 0 {
+				// should only have one CNAME RR
+				cnameRR, err := dns.NewRR(cnameList[0])
+				if err == nil && cnameRR != nil {
+					r.Answer = append(r.Answer, cnameRR)
+					// get the canonical name for this request domain name
+					cnameData := dns.Field(cnameRR, 1)
+					// retry with canonical name
+					return HandleSingleQuestion(cnameData, qType, r, s)
+				}
+			}
+		}
 	}
 
 	// Has precise match, no need to scan further
