@@ -117,9 +117,12 @@ func HandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *dnsStore) bo
 				if err == nil && cnameRR != nil {
 					r.Answer = append(r.Answer, cnameRR)
 					// get the canonical name for this request domain name
-					cnameData := dns.Field(cnameRR, 1)
-					// retry with canonical name
-					return HandleSingleQuestion(cnameData, qType, r, s)
+					realCNameRR, ok := cnameRR.(*dns.CNAME)
+					if ok {
+						cnameData := realCNameRR.Target
+						// retry with canonical name
+						return HandleSingleQuestion(cnameData, qType, r, s)
+					}
 				}
 			}
 		}
