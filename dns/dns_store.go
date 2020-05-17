@@ -66,30 +66,17 @@ func newDNSStore(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC 
 	return s
 }
 
-// a.com => (a, com), empty string means cannot pop
-func popLeftmostLabel(domain string) (string, string) {
-	chunks := strings.SplitN(domain, ".", 2)
-	switch len(chunks) {
-	case 0:
-		return "", ""
-	case 1:
-		return "", domain
-	default:
-		return chunks[0], chunks[1]
-	}
+func (s *dnsStore) lookupNameMap(domainName string) (dnsRRTypeMap, bool) {
+	typeMap, hasTypeMap := s.store[domainName]
+	return typeMap, hasTypeMap
 }
 
-// Convert a list of strings into RRs.
-// Silently consume errors
-func stringsToRRs(sList []string) []dns.RR {
-	rrs := []dns.RR{}
-	for _, s := range sList {
-		rr, err := dns.NewRR(s)
-		if err == nil && rr != nil {
-			rrs = append(rrs, rr)
-		}
-	}
-	return rrs
+func (s *dnsStore) rlockStore() {
+	s.mu.RLock()
+}
+
+func (s *dnsStore) runlockStore() {
+	s.mu.RUnlock()
 }
 
 // Forward a new cache record to other machiens in the cluster
@@ -158,61 +145,6 @@ func (s *dnsStore) addCacheRecords(records []dns.RR) {
 		s.addCacheRecord(rr, true)
 
 	}
-}
-
-// Minimal version right now: replay resurive query
-func (s *dnsStore) HandleRecursiveQuery(req *dns.Msg, r *dns.Msg) {
-	c := new(dns.Client)
-	in, _, err := c.Exchange(req, "8.8.8.8:53")
-	if err != nil {
-		log.Println("HandleRecursiveQuery Failed")
-		return
-	}
-	r.Answer = in.Answer
-	r.Ns = in.Ns
-	r.Extra = in.Extra
-	// cache the results
-	s.addCacheRecords(r.Answer)
-	s.addCacheRecords(r.Ns)
-	s.addCacheRecords(r.Extra)
-	return
-}
-
-// Handle query from outside.
-// Supporting iterative queries only ATM
-func (s *dnsStore) ProcessDNSQuery(req *dns.Msg) *dns.Msg {
-	res := new(dns.Msg)
-	res.SetReply(req)
-
-	s.mu.RLock() // Lock!
-
-	unhandledQuestions := []dns.Question{}
-	// We ignore Qclass for now, since we only care about IN.
-	for _, q := range req.Question {
-		canHandleCurrentQuestion := s.HandleSingleQuestion(q.Name, q.Qtype, res)
-		if !canHandleCurrentQuestion {
-			unhandledQuestions = append(unhandledQuestions, q)
-		}
-	}
-
-	s.mu.RUnlock()
-
-	// Recursive Query
-	res.RecursionAvailable = true
-	if req.RecursionDesired && len(unhandledQuestions) > 0 {
-		// Create req for recursive with only the subset of unhandled questions
-		reqRec := req.Copy()
-		reqRec.Question = unhandledQuestions
-		// Create a new recursive query for unhandled questions
-		resRec := new(dns.Msg)
-		s.HandleRecursiveQuery(reqRec, resRec)
-		// Merge results of local and recursive
-		res.Answer = append(res.Answer, resRec.Answer...)
-		res.Extra = append(res.Extra, resRec.Extra...)
-		res.Ns = append(res.Ns, resRec.Ns...)
-	}
-
-	return res
 }
 
 func (s *dnsStore) getGlueRecords(nsName string) []*dns.RR {
@@ -285,100 +217,6 @@ func (s *dnsStore) getCacheRecords(domainName string, qType uint16) []*dns.RR {
 	}
 
 	return cacheRecords
-}
-
-// See rfc1034 4.3.2
-// Returns whether this single question can be handled locally
-func (s *dnsStore) HandleSingleQuestion(name string, qType uint16, r *dns.Msg) bool {
-	domainName := strings.ToLower(name)
-	hasPreciseMatch := false
-
-	// XXX: handle CNAME if we have time
-	typeMap, hasTypeMap := s.store[domainName]
-	if hasTypeMap {
-		rrStringList := typeMap[qType]
-		if rrStringList != nil && len(rrStringList) != 0 {
-			for _, rrString := range rrStringList {
-				rr, err := dns.NewRR(rrString)
-				if err == nil && rr != nil {
-					hasPreciseMatch = true // We have a precise match if we push entry
-					r.Answer = append(r.Answer, rr)
-				}
-			}
-		}
-	}
-
-	// Has precise match, no need to scan further
-	if hasPreciseMatch {
-		return true
-	}
-
-	// for now: query cache if no exact match
-	cacheRRPtrs := s.getCacheRecords(domainName, qType)
-	// check cache
-	for _, cr := range cacheRRPtrs {
-		r.Answer = append(r.Answer, *cr)
-	}
-	if len(cacheRRPtrs) > 0 {
-		return true
-	}
-
-	// 4.3.2.3.b, border of zone
-	if hasTypeMap {
-		nsList := typeMap[dns.TypeNS]
-		if len(nsList) > 0 { // has a new zone
-			rrs := stringsToRRs(nsList)
-			// If we actually delegate to a new zone
-			if len(rrs) > 0 {
-				// Try append glue record if exist
-				glueRRPtrs := []*dns.RR{}
-				for _, nsRR := range rrs {
-					glueRRPtrs = append(glueRRPtrs, s.getGlueRecords(nsRR.Header().Name)...)
-				}
-
-				glueRRs := []dns.RR{}
-				for _, glueRRPtr := range glueRRPtrs {
-					glueRRs = append(glueRRs, *glueRRPtr)
-				}
-
-				r.Ns = append(r.Ns, rrs...)
-				r.Extra = append(r.Extra, glueRRs...)
-				return false
-				// We have delegated to another server. Done.
-			}
-		}
-	}
-
-	// Otherwise, try repeating the process for star
-	// 4.3.2.3.c
-	var leftLabel, rest string // dummy init s.t. avoids local scope
-	rest = domainName
-	for {
-		leftLabel, rest = popLeftmostLabel(rest)
-		if leftLabel == "" {
-			return false
-			// break
-		}
-		hasMatch := false
-		// Try with wildcard prefix
-		if wildcardTypeMap, ok := s.store["*."+rest]; ok {
-			wildcardRRList := wildcardTypeMap[qType]
-			for _, wildCardRRString := range wildcardRRList {
-				rr, err := dns.NewRR(wildCardRRString)
-				if err == nil && rr != nil {
-					hasMatch = true
-					// Spec asks us to change the owner to be w/o star
-					rr.Header().Name = domainName
-					r.Answer = append(r.Answer, rr)
-				}
-			}
-		}
-		if hasMatch {
-			return true
-			// break
-		}
-	}
-	// Don't worry about *.somedomain.com for NS records, they are not supported
 }
 
 // 2 Propose methods.
@@ -527,14 +365,4 @@ func (s *dnsStore) recoverFromSnapshot(snapshot []byte) error {
 	s.store = store
 	s.mu.Unlock()
 	return nil
-}
-
-// Implicitly at port 53
-func serveUDPAPI(store *dnsStore) {
-	server := &dns.Server{Addr: ":53", Net: "udp"}
-	go server.ListenAndServe()
-	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
-		res := store.ProcessDNSQuery(r)
-		w.WriteMsg(res)
-	})
 }

@@ -29,6 +29,10 @@ run:
 stop:
 	pkill $(NAME)
 
+clean:
+	go clean
+	rm -rf raftexample*
+
 # simple test of adding A record and digging for it
 test:
 	curl -d "google.com. IN A 10.0.0.1" -X PUT -L http://127.0.0.1:$(PUT-PORT)/add
