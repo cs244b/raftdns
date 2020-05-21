@@ -36,17 +36,36 @@ func writeRequest(request string) bool {
 	return true
 }
 
+func deleteRequest(name string, rrType string) bool {
+	jsonRR := fmt.Sprintf("{ \"name\": \"%s\", \"rrType\": \"%s\" }", name, rrType)
+	addr := fmt.Sprintf("http://%s:9121/delete", *dnsIP)
+	req, err := http.NewRequest("PUT", addr, strings.NewReader(jsonRR))
+	if err != nil {
+		log.Printf("deleteRequest failed to form request: %v\n", err)
+		return false
+	}
+	req.ContentLength = int64(len(jsonRR))
+	_, err = http.DefaultClient.Do(req)
+	if err != nil {
+		log.Println(jsonRR)
+		log.Printf("deleteRequest delete failed: %v\n", err)
+		return false
+	}
+	return true
+}
+
 // wg *sync.WaitGroup
-func throughputClient(done chan interface{}, counter chan int, readRatio float64) {
+func throughputClient(done chan interface{}, readCounter chan int, writeCounter chan int, readRatio float64) {
 	// defer wg.Done()
-	count := 1
+	var readCount, writeCount int
 	c := new(dns.Client)
 	for {
 		// finish when done is closed
 		select {
 		case <-done:
 			//end the loop
-			counter <- count
+			readCounter <- readCount
+			writeCounter <- writeCount
 			return
 		default:
 			r := rand.Float64()
@@ -55,52 +74,69 @@ func throughputClient(done chan interface{}, counter chan int, readRatio float64
 				// send dns query
 				req := new(dns.Msg)
 				// randomize query
-				index := rand.Intn(100)
+				index := rand.Intn(256 * 256)
+				// c := index / 256 / 256
+				domain := fmt.Sprintf("write-%d.com.", index)
 				// set up through populate.sh
-				req.SetQuestion(fmt.Sprintf("example-%d.com.", index), dns.TypeA)
+				// req.SetQuestion(fmt.Sprintf("example-%d.com.", index), dns.TypeA)
+				req.SetQuestion(domain, dns.TypeA)
 				req.RecursionDesired = false
 				// make a request
 				_, _, err := c.Exchange(req, *dnsIP+":53")
 				if err != nil {
 					log.Printf("Req failed %v\n", err)
 				} else {
-					count++
+					readCount++
 				}
 			} else {
 				// write request
-				index := rand.Intn(256)
-				writeRR := fmt.Sprintf("write-%d.com IN A 100.100.101.%d", index, index)
+				index := rand.Intn(256 * 256)
+				a := index % 256
+				b := index / 256
+				// c := index / 256 / 256
+				domain := fmt.Sprintf("write-%d.com.", index)
+				// we do not have deduplication in dns store yet
+				deleteRequest(domain, "A")
+				writeRR := fmt.Sprintf("%s IN A 100.100.%d.%d", domain, a, b)
 				if writeRequest(writeRR) {
-					count++
+					// should we add 2 since delete is also a write!
+					writeCount++
 				}
 			}
 		}
 	}
 }
 
-func measureThroughput(duration int, numClient int, readRatio float64) int {
+// return number of finished (read queries, write queries)
+func measureThroughput(duration int, numClient int, readRatio float64) (int, int) {
 	done := make(chan interface{})
-	counter := make(chan int)
+	readCounter := make(chan int)
+	writeCounter := make(chan int)
 	// wait for client threads
 	// wg := new(sync.WaitGroup)
 	for i := 0; i < numClient; i++ {
 		// wg.Add(1)
-		go throughputClient(done, counter, readRatio)
+		go throughputClient(done, readCounter, writeCounter, readRatio)
 	}
 	// run each client for duration seconds
 	time.Sleep(time.Duration(duration) * time.Second)
 	close(done)
 	// collect count of number of finished DNS queries
 	// wg.Wait()
-	numQueries := 0
+	var readQueries, writeQueries int
 	for i := 0; i < numClient; i++ {
-		t := <-counter
-		log.Println(t)
-		numQueries += t
+		r := <-readCounter
+		w := <-writeCounter
+		log.Printf("Read %d, Written %d\n", r, w)
+		readQueries += r
+		writeQueries += w
 	}
-	log.Printf("%.2f queries per second\n", float64(numQueries)/float64(duration))
+	log.Println()
+	log.Printf("%.2f reads per second\n", float64(readQueries)/float64(duration))
+	log.Printf("%.2f writes per second\n", float64(writeQueries)/float64(duration))
+	log.Printf("Total %.2f operations per second\n\n", float64(readQueries+writeQueries)/float64(duration))
 	// return number of queries done
-	return numQueries
+	return readQueries, writeQueries
 }
 
 func latencyClient(c chan []int, numQuery int) {
