@@ -159,19 +159,31 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 		// Be CAREFUL! Always ensure that the name requested ends with "."
 		cToken := clusterToken(store.lookup.LocateKey([]byte(rr.Header().Name)).String())
 		cluster := store.clusters[cToken]
-		// Randomly pick one from the cluster
-		randomMember := cluster.members[rand.Intn(len(cluster.members))]
-		randomMemberIP := getIPFromARecord(randomMember.glueRecord)
-		u := fmt.Sprintf("http://%s:9121/add", randomMemberIP.String())
-		req, err := http.NewRequest("PUT", u, strings.NewReader(rrString))
-		if err != nil {
-			log.Println("Cannot forward request /add")
-			http.Error(w, "Cannot forward request /add", http.StatusInternalServerError)
-			return
+		// Repeatedly try with each of the cluster members
+		chosenServers := getPreferredServerIPsInOrder(cluster.members)
+		for _, s := range chosenServers {
+			serverIP := getIPFromARecord(s.glueRecord)
+			u := fmt.Sprintf("http://%s:9121/add", serverIP.String())
+			req, err := http.NewRequest("PUT", u, strings.NewReader(rrString))
+			if err != nil {
+				log.Println("Cannot forward request /add")
+				http.Error(w, "Cannot forward request /add", http.StatusInternalServerError)
+				// This error is unrelated with the storage cluster, so we fail right away
+				return
+			}
+			req.ContentLength = int64(len(rrString))
+			resp, err := http.DefaultClient.Do(req) // In its independent goroutine so blocking is fine
+
+			if err != nil {
+				// Storage cluster member not reachable, mark it to be not alive for the next 0.5 second
+				s.aliveMutex.Lock() // Write lock
+				s.aliveSince = time.Now().Add(500 * time.Millisecond)
+				s.aliveMutex.Unlock()
+			} else { // Success reply from storage cluster member
+				w.WriteHeader(resp.StatusCode)
+				return
+			}
 		}
-		req.ContentLength = int64(len(rrString))
-		resp, err := http.DefaultClient.Do(req) // In its independent goroutine so blocking is fine
-		w.WriteHeader(resp.StatusCode)
 	})
 
 	// PUT /delete
@@ -200,19 +212,30 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 		// Be CAREFUL! Always ensure that the name requested ends with "."
 		cToken := clusterToken(store.lookup.LocateKey([]byte(delReq.Name)).String())
 		cluster := store.clusters[cToken]
-		// Randomly pick one from the cluster
-		randomMember := cluster.members[rand.Intn(len(cluster.members))]
-		randomMemberIP := getIPFromARecord(randomMember.glueRecord)
-		u := fmt.Sprintf("http://%s:9121/delete", randomMemberIP.String())
-		req, err := http.NewRequest("PUT", u, bytes.NewReader(body))
-		if err != nil {
-			log.Println("Cannot forward request /delete")
-			http.Error(w, "Cannot forward request /delete", http.StatusInternalServerError)
-			return
+		// Repeatedly try with each of the cluster members
+		chosenServers := getPreferredServerIPsInOrder(cluster.members)
+		for _, s := range chosenServers {
+			serverIP := getIPFromARecord(s.glueRecord)
+			u := fmt.Sprintf("http://%s:9121/delete", serverIP.String())
+			req, err := http.NewRequest("PUT", u, bytes.NewReader(body))
+			if err != nil {
+				log.Println("Cannot forward request /delete")
+				http.Error(w, "Cannot forward request /delete", http.StatusInternalServerError)
+				return
+			}
+			req.ContentLength = int64(len(body))
+			resp, err := http.DefaultClient.Do(req) // In its independent goroutine so blocking is fine
+
+			if err != nil {
+				// Storage cluster member not reachable, mark it to be not alive for the next 0.5 second
+				s.aliveMutex.Lock() // Write lock
+				s.aliveSince = time.Now().Add(500 * time.Millisecond)
+				s.aliveMutex.Unlock()
+			} else { // Success reply from storage cluster member
+				w.WriteHeader(resp.StatusCode)
+				return
+			}
 		}
-		req.ContentLength = int64(len(body))
-		resp, err := http.DefaultClient.Do(req) // In its independent goroutine so blocking is fine
-		w.WriteHeader(resp.StatusCode)
 	})
 
 	go func() {
@@ -238,6 +261,11 @@ func sendDNSMsgUntilSuccess(m *dns.Msg, servers []*nsInfo) (*dns.Msg, error) {
 	}
 	var in *dns.Msg
 	var err error
+	// XXX: this assumes that datagram loss rate won't be too bad, otherwise there are
+	// risk where somehow all UDP packets are lost. This is more of a policy related
+	// issue instead of correctness: we will have to give up looping at some point.
+	// In practice, we would assume that hash server has somewhat more reliable network
+	// to storage clusters.
 	for _, s := range servers {
 		serverIP := getIPFromARecord(s.glueRecord)
 		in, _, err = c.Exchange(m, serverIP.String()+":53")
