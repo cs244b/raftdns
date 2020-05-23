@@ -45,7 +45,7 @@ func main() {
 	clusterIP := []string{}
 	for i, ip := range strings.Split(*cluster, ",") {
 		// !Careful, hardcoded length
-		clusterIP = append(clusterIP, ip[:len(ip)-5]+strconv.Itoa(*httpAPIPort))
+		clusterIP = append(clusterIP, ip[:len(ip)-4]+strconv.Itoa(*httpAPIPort))
 		log.Printf("cluster ip %v\n", clusterIP[i])
 	}
 
