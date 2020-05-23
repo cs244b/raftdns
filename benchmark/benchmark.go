@@ -21,7 +21,7 @@ func getPercentile(vals []int, percentile int) int {
 }
 
 func writeRequest(request string) bool {
-	addr := fmt.Sprintf("http://%s:9121/add", *dnsIP)
+	addr := fmt.Sprintf("http://%s:9121/add", getDNSServerIP())
 	req, err := http.NewRequest("PUT", addr, strings.NewReader(request))
 	if err != nil {
 		log.Printf("writeRequest failed to form request: %v\n", err)
@@ -37,8 +37,9 @@ func writeRequest(request string) bool {
 }
 
 func deleteRequest(name string, rrType string) bool {
+	// hardcoded JSON formatted string
 	jsonRR := fmt.Sprintf("{ \"name\": \"%s\", \"rrType\": \"%s\" }", name, rrType)
-	addr := fmt.Sprintf("http://%s:9121/delete", *dnsIP)
+	addr := fmt.Sprintf("http://%s:9121/delete", getDNSServerIP())
 	req, err := http.NewRequest("PUT", addr, strings.NewReader(jsonRR))
 	if err != nil {
 		log.Printf("deleteRequest failed to form request: %v\n", err)
@@ -52,6 +53,36 @@ func deleteRequest(name string, rrType string) bool {
 		return false
 	}
 	return true
+}
+
+func populateDNS(numRR int) {
+	i := 0
+	for a := 0; a < 256; a++ {
+		for b := 0; b < 256; b++ {
+			for c := 0; c < 256; c++ {
+				for d := 0; d < 256; d++ {
+					domain := fmt.Sprintf("example-%d.com.", i)
+					writeRR := fmt.Sprintf("%s IN A %d.%d.%d.%d", domain, a, b, c, d)
+					// if !writeRequest(writeRR) {
+					// 	log.Printf("Populate at %d failed\n", i)
+					// }
+					if d%2 == 0 {
+						go writeRequest(writeRR)
+					} else {
+						writeRequest(writeRR)
+					}
+					if i%10000 == 0 {
+						time.Sleep(2 * time.Second)
+					}
+
+					i++
+					if i == numRR {
+						return
+					}
+				}
+			}
+		}
+	}
 }
 
 // wg *sync.WaitGroup
@@ -73,16 +104,22 @@ func throughputClient(done chan interface{}, readCounter chan int, writeCounter 
 			if r < readRatio {
 				// send dns query
 				req := new(dns.Msg)
-				// randomize query
-				index := rand.Intn(256 * 256)
-				// c := index / 256 / 256
-				domain := fmt.Sprintf("write-%d.com.", index)
-				// set up through populate.sh
-				// req.SetQuestion(fmt.Sprintf("example-%d.com.", index), dns.TypeA)
+				var domain string
+				if *localread {
+					// set up through populate.sh
+					i := rand.Intn(100)
+					j := rand.Intn(100)
+					domain = fmt.Sprintf("example-%d-%d.com.", i, j)
+				} else {
+					// randomize query
+					index := rand.Intn(*dbSize)
+					domain = fmt.Sprintf("example-%d.com.", index)
+				}
+
 				req.SetQuestion(domain, dns.TypeA)
 				req.RecursionDesired = false
 				// make a request
-				_, _, err := c.Exchange(req, *dnsIP+":53")
+				_, _, err := c.Exchange(req, getDNSServerIP()+":53")
 				if err != nil {
 					log.Printf("Req failed %v\n", err)
 				} else {
@@ -90,10 +127,10 @@ func throughputClient(done chan interface{}, readCounter chan int, writeCounter 
 				}
 			} else {
 				// write request
-				index := rand.Intn(256 * 256)
-				a := index % 256
-				b := index / 256
-				// c := index / 256 / 256
+				a := rand.Intn(256)
+				b := rand.Intn(256)
+				// index := rand.Intn(256 * 256)
+				index := a * b
 				domain := fmt.Sprintf("write-%d.com.", index)
 				// we do not have deduplication in dns store yet
 				deleteRequest(domain, "A")
@@ -127,7 +164,7 @@ func measureThroughput(duration int, numClient int, readRatio float64) (int, int
 	for i := 0; i < numClient; i++ {
 		r := <-readCounter
 		w := <-writeCounter
-		log.Printf("Read %d, Written %d\n", r, w)
+		// log.Printf("Read %d, Written %d\n", r, w)
 		readQueries += r
 		writeQueries += w
 	}
@@ -143,6 +180,7 @@ func latencyClient(c chan []int, numQuery int) {
 	var latencies []int
 	sumLatencies := 0
 	for i := 0; i < numQuery; i++ {
+		// only reading example-%d.com yet, i.e., local read
 		// take current time
 		c := new(dns.Client)
 		req := new(dns.Msg)
@@ -154,7 +192,8 @@ func latencyClient(c chan []int, numQuery int) {
 
 		// time the request
 		startTime := time.Now()
-		_, _, err := c.Exchange(req, *dnsIP+":53")
+		// choose a dns server at random to send the query
+		_, _, err := c.Exchange(req, getDNSServerIP()+":53")
 		if err != nil {
 			log.Printf("Req failed %v\n", err)
 		} else {
@@ -166,6 +205,8 @@ func latencyClient(c chan []int, numQuery int) {
 	}
 	sort.Ints(latencies)
 	log.Println(latencies)
+
+	// p50, p90, p99
 	var percentiles = []int{50, 90, 99}
 	if len(latencies) > 0 {
 		log.Printf("Avg latency: %f ms\n", float64(sum(latencies))/float64(len(latencies))/1000)
@@ -210,19 +251,30 @@ func measureLatency(numQuery int, numClient int) []int {
 	return latencies
 }
 
-var dnsIP *string
+// choose dns server uniformly at random
+func getDNSServerIP() string {
+	return dnsIPs[rand.Intn(len(dnsIPs))]
+}
+
+var dnsIPs []string
+var localread *bool
+var dbSize *int
 
 func main() {
 	rand.Seed(time.Now().Unix())
-	dnsIP = flag.String("ip", "127.0.0.1", "the ip address to send dns query to")
+	dnsIP := flag.String("ip", "127.0.0.1", "comma separated ip addresses to send dns query to")
 	// t for throughput
 	benchmarkType := flag.String("type", "l", "what to benchmark")
 	numClient := flag.Int("client", 1, "number of client threads")
 	numQuery := flag.Int("query", 100, "[latency] number of queries to send")
 	duration := flag.Int("duration", 30, "[throughput] number of seconds to run")
 	readRatio := flag.Float64("readratio", 1, "[throughput] read request ratio in [0,1]")
+	localread = flag.Bool("localread", false, "whether to read from a small set of domain")
+	dbSize = flag.Int("size", 100, "number of RR in dns server")
 
 	flag.Parse()
+	dnsIPs = strings.Split(*dnsIP, ",")
+
 	switch *benchmarkType {
 	case "latency":
 		fallthrough
@@ -236,6 +288,10 @@ func main() {
 		// measure throughput
 		measureThroughput(*duration, *numClient, *readRatio)
 
+	case "populate":
+		fallthrough
+	case "p":
+		populateDNS(*dbSize)
 	default:
 		log.Println("Wrong benchmark type")
 	}
