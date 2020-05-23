@@ -60,9 +60,9 @@ func newDNSStore(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC 
 		id:          id,
 	}
 	// Replay historical commits to in-memory store
-	s.readCommits(commitC, errorC)
+	s.readCommits(commitC, errorC, true)
 	// Read more commits for incoming (commits that are caused by proposals)
-	go s.readCommits(commitC, errorC)
+	go s.readCommits(commitC, errorC, false)
 	return s
 }
 
@@ -296,9 +296,40 @@ func (s *dnsStore) loadFromZoneFile(filename string) error {
 	return nil
 }
 
-func (s *dnsStore) readCommits(commitC <-chan *string, errorC <-chan error) {
+func (s *dnsStore) readCommits(commitC <-chan *string, errorC <-chan error, isInit bool) {
+	// BEGIN BUG
+	// KSM: If during initialization, it seems that we should first load the snapshot
+	// before replaying any future queries from commitC!
+	// The order given in the example boilerplate seems to be buggy here.
+	if isInit {
+		snapshot, err := s.snapshotter.Load()
+		if err != snap.ErrNoSnapshot {
+			if err != nil && err != snap.ErrNoSnapshot {
+				log.Panic(err)
+			}
+			log.Printf("loading snapshot at term %d and index %d", snapshot.Metadata.Term, snapshot.Metadata.Index)
+			if err := s.recoverFromSnapshot(snapshot.Data); err != nil {
+				log.Panic(err)
+			}
+		}
+	}
+	// END BUG
 	for data := range commitC {
 		if data == nil {
+
+			// BEGIN BUG
+			// KSM: Delete this isInit clause if it is causing trouble.
+			// It seems that snapshots are all loaded at once, and only a single commitC <- nil
+			// will be ever fired during init.
+			// Therefore, without this change, whenever there exists a single snapshot,
+			// we would be stuck forever, since the only moment where we return is when
+			// err == snap.ErrNoSnapshot, which could probably never happen!
+			// Seems to be a bug from example boilerplate code.
+			if isInit {
+				return
+			}
+			// END BUG
+
 			// done replaying log; new data incoming
 			// OR signaled to load snapshot
 			snapshot, err := s.snapshotter.Load()
