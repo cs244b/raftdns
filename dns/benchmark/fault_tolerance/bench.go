@@ -64,19 +64,21 @@ func populateDNSStore(numRR int) {
 }
 
 // pure read request
-func throughputClient(idx int, done chan string, precision float64) {
+func throughputClient(idx int, done chan string, interval float64, tpC chan float64) {
 	client := new(dns.Client)
 	numResponse := 0
-	ticker := time.NewTicker(time.Duration(precision*1000) * time.Millisecond)
+	ticker := time.NewTicker(time.Duration(interval*1000) * time.Millisecond)
 	quit := make(chan struct{})
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Printf("Read throughput: %.2f responses/sec\n", float64(numResponse)/precision)
+				fmt.Printf("Read throughput from client %d : %.2f responses/sec\n", idx, float64(numResponse)/interval)
+				tpC <- float64(numResponse) / interval
 				numResponse = 0
 			case <-quit:
 				ticker.Stop()
+				close(tpC)
 				return
 			}
 		}
@@ -103,13 +105,30 @@ func throughputClient(idx int, done chan string, precision float64) {
 }
 
 // pure read request
-func measureTp(duration int, numClient int, precision float64) {
+func measureTp(duration int, numClient int, interval float64) {
 	done := make(chan string)
+	tpC := make(chan float64)
 	for i := 0; i < numClient; i++ {
-		go throughputClient(i, done, precision)
+		go throughputClient(i, done, interval, tpC)
 	}
-	time.Sleep(time.Duration(duration) * time.Second)
-	close(done)
+
+	ticker := time.NewTicker(time.Duration(duration) * time.Second)
+	go func() {
+		<-ticker.C
+		close(done)
+		fmt.Printf("Test ended.\n")
+	}()
+	tp := 0.0
+	i := 0
+	for tpVal := range tpC {
+		tp += tpVal
+		i++
+		if i == numClient {
+			fmt.Printf("Read throughput from all clients: %.2f responses/sec\n", tp)
+			tp = 0
+			i = 0
+		}
+	}
 }
 
 func main() {
@@ -121,7 +140,7 @@ func main() {
 	// readRatio := flag.Float64("readratio", 1, "[throughput] read request ratio in [0,1]")
 	dbSize = flag.Int("size", 100, "number of RR in dns server")
 	duration := flag.Int("duration", 30, "[throughput] number of seconds to run")
-	precision := flag.Float64("precision", 1, "measure throughout every x second")
+	interval := flag.Float64("interval", 1, "measure throughout every x second")
 	// kill := flag.Bool("kill", false, "whether this program kill or restart the node")
 	// killtime1 := flag.Int("killtime1", 10, "when to kill the first server node")
 	// killtime2 := flag.Int("killtime2", 20, "when to kill the second server node")
@@ -139,7 +158,7 @@ func main() {
 		log.Println("Wrong benchmark type")
 
 	case "t":
-		measureTp(*duration, *numClient, *precision)
+		measureTp(*duration, *numClient, *interval)
 	}
 
 }
