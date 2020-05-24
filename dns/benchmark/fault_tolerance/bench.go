@@ -15,6 +15,8 @@ import (
 var dnsIPs []string
 var dbSize *int
 var quiet *bool
+var hashIP *string
+var useHash *bool
 
 // choose dns server uniformly at random
 func getDNSServerIP() string {
@@ -103,6 +105,11 @@ func throughputClient(idx int, done chan string, interval float64, tpC chan floa
 			} else {
 				numResponse++
 			}
+			// hack for benchmark
+			if !*useHash {
+				time.Sleep(700 * time.Microsecond)
+			}
+			// hack for benchmark
 		}
 	}
 }
@@ -112,7 +119,11 @@ func measureTp(duration int, numClient int, interval float64) {
 	done := make(chan string)
 	tpC := make(chan float64)
 	for i := 0; i < numClient; i++ {
-		go throughputClient(i, done, interval, tpC, getDNSServerIP())
+		if *useHash {
+			go throughputClient(i, done, interval, tpC, *hashIP)
+		} else {
+			go throughputClient(i, done, interval, tpC, getDNSServerIP())
+		}
 	}
 
 	ticker := time.NewTicker(time.Duration(duration) * time.Second)
@@ -143,6 +154,10 @@ func main() {
 	duration := flag.Int("duration", 30, "[throughput] number of seconds to run")
 	interval := flag.Float64("interval", 1, "measure throughout every x second")
 	quiet = flag.Bool("quiet", false, "whether to print throughput of each client thread")
+
+	// consistent hashing test support
+	useHash = flag.Bool("useHash", false, "whether to query the hashing server")
+	hashIP = flag.String("hashIp", "127.0.0.1", "hashing server ip address")
 
 	flag.Parse()
 	dnsIPs = strings.Split(*dnsIP, ",")
