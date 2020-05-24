@@ -14,6 +14,7 @@ import (
 
 var dnsIPs []string
 var dbSize *int
+var quiet *bool
 
 // choose dns server uniformly at random
 func getDNSServerIP() string {
@@ -64,7 +65,7 @@ func populateDNSStore(numRR int) {
 }
 
 // pure read request
-func throughputClient(idx int, done chan string, interval float64, tpC chan float64) {
+func throughputClient(idx int, done chan string, interval float64, tpC chan float64, serverip string) {
 	client := new(dns.Client)
 	numResponse := 0
 	ticker := time.NewTicker(time.Duration(interval*1000) * time.Millisecond)
@@ -73,7 +74,9 @@ func throughputClient(idx int, done chan string, interval float64, tpC chan floa
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Printf("Read throughput from client %d : %.2f responses/sec\n", idx, float64(numResponse)/interval)
+				if !*quiet {
+					fmt.Printf("Read throughput from client %d : %.2f responses/sec\n", idx, float64(numResponse)/interval)
+				}
 				tpC <- float64(numResponse) / interval
 				numResponse = 0
 			case <-quit:
@@ -94,7 +97,7 @@ func throughputClient(idx int, done chan string, interval float64, tpC chan floa
 			domain := fmt.Sprintf("example-%d.com.", rand.Intn(*dbSize))
 			req.SetQuestion(domain, dns.TypeA)
 			req.RecursionDesired = false
-			_, _, err := client.Exchange(req, getDNSServerIP()+":53")
+			_, _, err := client.Exchange(req, serverip+":53")
 			if err != nil {
 				log.Printf("Req failed %v\n", err)
 			} else {
@@ -109,7 +112,7 @@ func measureTp(duration int, numClient int, interval float64) {
 	done := make(chan string)
 	tpC := make(chan float64)
 	for i := 0; i < numClient; i++ {
-		go throughputClient(i, done, interval, tpC)
+		go throughputClient(i, done, interval, tpC, getDNSServerIP())
 	}
 
 	ticker := time.NewTicker(time.Duration(duration) * time.Second)
@@ -132,21 +135,14 @@ func measureTp(duration int, numClient int, interval float64) {
 }
 
 func main() {
-
 	dnsIP := flag.String("ip", "127.0.0.1", "comma separated ip addresses to send dns query to")
 	benchmarkType := flag.String("type", "t", "benchmark type: t for throughput, p for populate")
 	// client send at its full speed. Change client number to adjust sending rate
 	numClient := flag.Int("client", 1, "number of client threads, each sending request at its full speed")
-	// readRatio := flag.Float64("readratio", 1, "[throughput] read request ratio in [0,1]")
 	dbSize = flag.Int("size", 100, "number of RR in dns server")
 	duration := flag.Int("duration", 30, "[throughput] number of seconds to run")
 	interval := flag.Float64("interval", 1, "measure throughout every x second")
-	// kill := flag.Bool("kill", false, "whether this program kill or restart the node")
-	// killtime1 := flag.Int("killtime1", 10, "when to kill the first server node")
-	// killtime2 := flag.Int("killtime2", 20, "when to kill the second server node")
-	// restarttime1 := flag.Int("restarttime1", 25, "when to restart the first server node")
-	// TODO: when to kill server and when to start
-	// TODO: who to kill server
+	quiet = flag.Bool("quiet", false, "whether to print throughput of each client thread")
 
 	flag.Parse()
 	dnsIPs = strings.Split(*dnsIP, ",")

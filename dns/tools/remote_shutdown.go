@@ -29,7 +29,7 @@ func start_dnsserver(w http.ResponseWriter, req *http.Request) {
 	if err := cmd.Start(); err != nil {
 		log.Fatal(err)
 	}
-	log.Print("Starting running dns_server with arguement %s", argvstr)
+	log.Print("Starting running dns_server with arguement %s\n", argvstr)
 	fmt.Fprintf(w, "Starting running dns_server with argument %s", argvstr)
 }
 
@@ -38,7 +38,7 @@ func kill_dnsserver(w http.ResponseWriter, req *http.Request) {
 		log.Fatal(err)
 	}
 	// syscall.Kill(cmd.Process.Pid, syscall.SIGINT)
-	log.Print("Killed the running dns_server")
+	log.Print("Killed the running dns_server\n")
 	fmt.Fprintf(w, "Killed the running dns_server")
 }
 
