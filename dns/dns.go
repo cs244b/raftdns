@@ -202,6 +202,7 @@ func HandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *dnsStore) bo
 		}
 	}
 	// Don't worry about *.somedomain.com for NS records, they are not supported
+	return false
 }
 
 // Implicitly at port 53
