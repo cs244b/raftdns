@@ -21,11 +21,13 @@ import (
 )
 
 // PageStoreMaxLen is max number of pages allowed in memory
-const PageStoreMaxLen = 2
+// Set this to 2 for easy debugging validation of LRU policy.
+const PageStoreMaxLen = 100
 
 // PageSize is the expected size inside of a page.
 // e.g. if PageSize = 1, there will be 2^63 pages
-const PageSize = 62
+// Set this to 62 for easy debugging validation of LRU policy.
+const PageSize = 32
 
 // Get page number given a (domain) name. The corresponding entry should
 // be on that single page.
