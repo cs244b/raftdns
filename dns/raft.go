@@ -26,11 +26,19 @@ import (
 	"github.com/coreos/etcd/wal/walpb"
 )
 
+// This is introduced such that we can get the commit index.
+// This index is important to ensure idempotency when applying commits,
+// since we now store pages ourselves.
+type commitInfo struct {
+	index uint64 // This should be raftpb.Entry.Index. Not super sure if it means the log index.
+	data  *string
+}
+
 // A key-value stream backed by raft
 type raftNode struct {
 	proposeC    <-chan string            // proposed messages (k,v)
 	confChangeC <-chan raftpb.ConfChange // proposed cluster config changes
-	commitC     chan<- *string           // entries committed to log (k,v)
+	commitC     chan<- *commitInfo       // entries committed to log (k,v)
 	errorC      chan<- error             // errors from raft session
 
 	id          int      // client ID for raft session
@@ -68,9 +76,9 @@ var defaultSnapCount uint64 = 10000
 // commit channel, followed by a nil message (to indicate the channel is
 // current), then new log entries. To shutdown, close proposeC and read errorC.
 func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, error), proposeC <-chan string,
-	confChangeC <-chan raftpb.ConfChange) (<-chan *string, <-chan error, <-chan *snap.Snapshotter) {
+	confChangeC <-chan raftpb.ConfChange) (<-chan *commitInfo, <-chan error, <-chan *snap.Snapshotter) {
 
-	commitC := make(chan *string)
+	commitC := make(chan *commitInfo)
 	errorC := make(chan error)
 
 	rc := &raftNode{
@@ -138,8 +146,12 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) bool {
 				break
 			}
 			s := string(ents[i].Data)
+			newCommitInfo := commitInfo{
+				index: ents[i].Index,
+				data:  &s,
+			}
 			select {
-			case rc.commitC <- &s:
+			case rc.commitC <- &newCommitInfo:
 			case <-rc.stopc:
 				return false
 			}

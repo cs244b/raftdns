@@ -50,7 +50,7 @@ type dnsStore struct {
 	id      int
 }
 
-func newDNSStore(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <-chan *string, errorC <-chan error, cluster []string, id int) *dnsStore {
+func newDNSStore(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <-chan *commitInfo, errorC <-chan error, cluster []string, id int) *dnsStore {
 	s := &dnsStore{
 		proposeC:    proposeC,
 		store:       make(map[string]dnsRRTypeMap),
@@ -296,7 +296,7 @@ func (s *dnsStore) loadFromZoneFile(filename string) error {
 	return nil
 }
 
-func (s *dnsStore) readCommits(commitC <-chan *string, errorC <-chan error, isInit bool) {
+func (s *dnsStore) readCommits(commitC <-chan *commitInfo, errorC <-chan error, isInit bool) {
 	// BEGIN BUG
 	// KSM: If during initialization, it seems that we should first load the snapshot
 	// before replaying any future queries from commitC!
@@ -347,7 +347,7 @@ func (s *dnsStore) readCommits(commitC <-chan *string, errorC <-chan error, isIn
 		}
 
 		var proposal dnsProposal
-		dec := gob.NewDecoder(bytes.NewBufferString(*data))
+		dec := gob.NewDecoder(bytes.NewBufferString(*data.data))
 		if err := dec.Decode(&proposal); err != nil {
 			log.Fatalf("dnsStore: could not decode message (%v)", err)
 		}
