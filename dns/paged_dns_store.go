@@ -26,7 +26,7 @@ const PageStoreMaxLen = 100
 
 // PageSize is the expected size inside of a page.
 // e.g. if PageSize = 1, there will be 2^63 pages
-// Set this to 62 for easy debugging validation of LRU policy.
+// Set this to 62 for easy debugging validation of LRU policy. (4 pages max)
 const PageSize = 32
 
 // Get page number given a (domain) name. The corresponding entry should
@@ -50,8 +50,8 @@ type pagedDNSStore struct {
 	proposeC chan<- string // New entry proposals is sent to here
 	mu       sync.RWMutex
 	pages    pageStoreMap // ...Where actual entrys are stored
-	// NOTICE: lruList elements are of type *pageStore
-	lruList     list.List // List of least recently used pageStore
+	// NOTICE: lruList elements are of type *PageStore
+	lruList     list.List // List of least recently used PageStore
 	snapshotter *snap.Snapshotter
 	cache       map[string]cacheRRTypeMap // cache for non-authoritative records
 	// XXX: optionally need a cache for glue records
@@ -170,7 +170,7 @@ func (s *pagedDNSStore) loadPageAndUpdateLRU(pageNum uint64) {
 		poppedVal := s.lruList.Remove(s.lruList.Front())
 		if page, ok := poppedVal.(*PageStore); ok {
 			s.writePageOut(page.Key)  // Swap out the page to file.
-			delete(s.pages, page.Key) // Drop page from map. Data should be deleted.
+			delete(s.pages, page.Key) // Drop page from map. Data should be deleted from memory.
 		}
 		// theoretically, "else" should not be possible...
 	}
@@ -514,11 +514,52 @@ func (s *pagedDNSStore) readCommits(commitC <-chan *commitInfo, errorC <-chan er
 // Nothing to snapshot. Keeping these 2 for only commit replaying purposes.
 // When restarting, the map would be empty and reconstructed on query.
 
-func (s *pagedDNSStore) getSnapshot() ([]byte, error) {
-	return []byte{}, nil
+// Snapshots are still necessary: there are chances where pages in filesystem lags behind
+// that of the snapshot.
+// The opposite case of fs pages ahead of snapshot is handled with lastCommitIndex.
+
+type PagedDNSStoreSnapshot struct {
+	Pages   pageStoreMap
+	LRUList []uint64
 }
 
+// Lock protected
+func (s *pagedDNSStore) getSnapshot() ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snapshotStruct := PagedDNSStoreSnapshot{
+		Pages:   s.pages,
+		LRUList: []uint64{},
+	}
+	// Populate LRUList
+	for e := s.lruList.Front(); e != nil; e = e.Next() {
+		if pagePtr, ok := e.Value.(*PageStore); ok {
+			snapshotStruct.LRUList = append(snapshotStruct.LRUList, pagePtr.Key)
+		}
+	}
+
+	return json.Marshal(snapshotStruct)
+}
+
+// Lock protected
 func (s *pagedDNSStore) recoverFromSnapshot(snapshot []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var snapshotStruct PagedDNSStoreSnapshot
+	if err := json.Unmarshal(snapshot, &snapshotStruct); err != nil {
+		return err // Error deserializing, stop.
+	}
+
+	s.pages = snapshotStruct.Pages
+	s.lruList = list.List{}
+	for _, key := range snapshotStruct.LRUList {
+		// Reestablish circular reference between page and lruList element
+		pagePtr := s.pages[key]
+		pagePtr.lruElement = s.lruList.PushBack(pagePtr)
+	}
+
 	return nil
 }
 
