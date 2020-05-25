@@ -101,8 +101,19 @@ func readSerializedPage(pageNum uint64) []byte {
 
 func writeSerializedPage(pageNum uint64, data []byte) error {
 	maybeCreatePageDir()
+	tempPageFilename := fmt.Sprintf("./pagedir/page_%d_temp", pageNum)
 	pageFilename := fmt.Sprintf("./pagedir/page_%d", pageNum)
-	return ioutil.WriteFile(pageFilename, data, 0777)
+	// Write to temporary file first. Avoids corrupting good page on sudden shutdown
+	err := ioutil.WriteFile(tempPageFilename, data, 0777)
+	if err == nil {
+		// If no error, do atomic-renaming like operation.
+		// This is technically not atomic, but the risk window is way smaller than direct rewriting.
+		os.Remove(pageFilename)
+		os.Rename(tempPageFilename, pageFilename)
+	} else { // Has error, remove temporary file.
+		os.Remove(tempPageFilename)
+	}
+	return err
 }
 
 func (s *pagedDNSStore) readPageIn(pageNum uint64) {
