@@ -18,58 +18,6 @@ func checkValidRRString(s string) bool {
 	return err == nil && rr != nil
 }
 
-// func (h *dnsHTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-// 	key := r.RequestURI
-// 	switch {
-// 	case r.Method == "POST":
-// 		url, err := ioutil.ReadAll(r.Body)
-// 		if err != nil {
-// 			log.Printf("Failed to read on POST (%v)\n", err)
-// 			http.Error(w, "Failed on POST", http.StatusBadRequest)
-// 			return
-// 		}
-
-// 		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
-// 		if err != nil {
-// 			log.Printf("Failed to convert ID for conf change (%v)\n", err)
-// 			http.Error(w, "Failed on POST", http.StatusBadRequest)
-// 			return
-// 		}
-
-// 		cc := raftpb.ConfChange{
-// 			Type:    raftpb.ConfChangeAddNode,
-// 			NodeID:  nodeId,
-// 			Context: url,
-// 		}
-// 		h.confChangeC <- cc
-
-// 		// As above, optimistic that raft will apply the conf change
-// 		w.WriteHeader(http.StatusNoContent)
-// 	case r.Method == "DELETE":
-// 		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
-// 		if err != nil {
-// 			log.Printf("Failed to convert ID for conf change (%v)\n", err)
-// 			http.Error(w, "Failed on DELETE", http.StatusBadRequest)
-// 			return
-// 		}
-
-// 		cc := raftpb.ConfChange{
-// 			Type:   raftpb.ConfChangeRemoveNode,
-// 			NodeID: nodeId,
-// 		}
-// 		h.confChangeC <- cc
-
-// 		// As above, optimistic that raft will apply the conf change
-// 		w.WriteHeader(http.StatusNoContent)
-// 	default:
-// 		w.Header().Set("Allow", "PUT")
-// 		w.Header().Add("Allow", "GET")
-// 		w.Header().Add("Allow", "POST")
-// 		w.Header().Add("Allow", "DELETE")
-// 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-// 	}
-// }
-
 type deleteRequestPayload struct {
 	Name         string `json:"name"`
 	RRTypeString string `json:"rrType"`
@@ -171,7 +119,68 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// TODO: confChange requests
+	// PUT /member/{nodeID}
+	// body: string(url, e.g. http://127.0.0.1:42379)
+	// Example: curl -L http://127.0.0.1:12380/member/{replace with NODE_ID} -XPUT -d http://127.0.0.1:42379
+
+	// DELETE /member/{nodeID}
+	// body: none
+	// Example: curl -L http://127.0.0.1:12380/member/{replace with NODE_ID} -XDELETE
+	router.HandleFunc("/member/{nodeID}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" {
+			url, err := ioutil.ReadAll(r.Body)
+			if err != nil {
+				log.Printf("Failed to read on PUT for /member (%v)\n", err)
+				http.Error(w, "Failed on PUT", http.StatusBadRequest)
+				return
+			}
+
+			vars := mux.Vars(r)
+			nodeID, err := strconv.ParseUint(vars["nodeID"], 0, 64)
+			if err != nil {
+				log.Printf("Failed to convert ID for conf change (%v)\n", err)
+				http.Error(w, "Failed on PUT", http.StatusBadRequest)
+				return
+			}
+
+			cc := raftpb.ConfChange{
+				Type:    raftpb.ConfChangeAddNode,
+				NodeID:  nodeID,
+				Context: url,
+			}
+			confChangeC <- cc
+
+			// As above, optimistic that raft will apply the conf change
+			w.WriteHeader(http.StatusNoContent)
+		} else if r.Method == "DELETE" {
+			vars := mux.Vars(r)
+			nodeID, err := strconv.ParseUint(vars["nodeID"], 0, 64)
+			if err != nil {
+				log.Printf("Failed to convert ID for conf change (%v)\n", err)
+				http.Error(w, "Failed on DELETE", http.StatusBadRequest)
+				return
+			}
+
+			cc := raftpb.ConfChange{
+				Type:   raftpb.ConfChangeRemoveNode,
+				NodeID: nodeID,
+			}
+			confChangeC <- cc
+
+			// As above, optimistic that raft will apply the conf change
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			http.Error(w, "/member Method has to be PUT or DELELTE", http.StatusBadRequest)
+			return
+		}
+		/* Example:
+		./dns_server --id 1 --cluster http://127.0.0.1:10000 --port 10001
+		curl -L http://127.0.0.1:10001/member/2 -XPUT -d http://127.0.0.1:20000
+		./dns_server --join --id 2 --cluster http://127.0.0.1:10000,http://127.0.0.1:20000 --port 20001
+		# Then do some DNS requests
+		curl -L http://127.0.0.1:20001/member/1 -XDELETE
+		*/
+	})
 
 	go func() {
 		if err := http.ListenAndServe(":"+strconv.Itoa(port), router); err != nil {
