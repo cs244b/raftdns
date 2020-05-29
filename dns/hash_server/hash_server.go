@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -213,6 +214,28 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 		req.ContentLength = int64(len(body))
 		resp, err := http.DefaultClient.Do(req) // In its independent goroutine so blocking is fine
 		w.WriteHeader(resp.StatusCode)
+	})
+
+	router.HandleFunc("/clusterinfo", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
+			return
+		}
+
+		// form a list clusters, each cluster is a list of nsInfo of nodes in the cluster
+
+		file, err := os.Open(*configFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer file.Close()
+		fileContent, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		io.WriteString(w, string(fileContent))
+		return
 	})
 
 	go func() {
@@ -445,6 +468,8 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 // The makeshift design is to have the server stop and does the migration manually.
 // However in real-world deployment we need to implement transparent migration without killing servers.
 
+var configFile *string
+
 func main() {
 	rand.Seed(time.Now().Unix())
 
@@ -452,7 +477,7 @@ func main() {
 		clusters: make(map[clusterToken]clusterInfo),
 	}
 
-	configFile := flag.String("config", "", "filename to load initial config")
+	configFile = flag.String("config", "", "filename to load initial config")
 	flag.Parse()
 
 	if err := loadConfig(&store, *configFile); err != nil {

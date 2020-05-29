@@ -1,8 +1,13 @@
 package main
 
 import (
+	"fmt"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -202,7 +207,6 @@ func HandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *dnsStore) bo
 		}
 	}
 	// Don't worry about *.somedomain.com for NS records, they are not supported
-	return false
 }
 
 // Implicitly at port 53
@@ -213,4 +217,44 @@ func serveUDPAPI(store *dnsStore) {
 		res := ProcessDNSQuery(r, store)
 		w.WriteMsg(res)
 	})
+}
+
+type nsInfo struct {
+	nsName     string
+	glueRecord dns.RR
+	aliveSince time.Time    // Mark since when the server is considered alive (will be a timestamp in the future if server is found to be down during polling)
+	aliveMutex sync.RWMutex // Mutex protecting aliveSince
+}
+
+func getClusterInfo(hashServer *string) {
+	// send HTTP request to hash server to retrieve cluster info
+	addr := *hashServer + "/clusterinfo"
+	req, err := http.NewRequest("GET", addr, strings.NewReader(""))
+	if err != nil {
+		log.Fatal("Cannot form get cluster info request")
+	}
+	req.ContentLength = 0
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if resp.StatusCode == http.StatusInternalServerError {
+		log.Fatal("Hash server internal server error")
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatal("Failed to read cluster info response")
+	}
+
+	fmt.Printf("Received: %s\n", body)
+	// return cluster
+}
+
+func migrateDNS(store *dnsStore, hashServer *string) {
+	// retrieve cluster info
+	getClusterInfo(hashServer)
+
+	// disable writes
 }
