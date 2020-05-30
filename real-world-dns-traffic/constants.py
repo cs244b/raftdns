@@ -1,4 +1,5 @@
 import dns.rdatatype
+from config import SERVER_IP
 
 rec_types = {
         0: 'ANY', 255: 'ALL',1: 'A', 2: 'NS', 3: 'MD', 4: 'MD', 5: 'CNAME',
@@ -14,4 +15,10 @@ supported_types = {
         'MX': dns.rdatatype.MX
         }
 
-NUM_THREADS = 15
+NUM_THREADS = 35
+
+NAMESERVERS = {
+        'google': '8.8.8.8',
+        'cloudflare': '1.1.1.1',
+        'ours': SERVER_IP
+        }

@@ -1,3 +1,5 @@
 scapy
 dnspython
 pycryptodome
+requests
+pprint
