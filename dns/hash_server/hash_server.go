@@ -238,6 +238,47 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 		return
 	})
 
+	// probably updateconfig is a bettre name
+	// the current name is consistent with httpapi.go
+	router.HandleFunc("/addcluster", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("add cluster")
+		if r.Method != "PUT" {
+			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
+			return
+		}
+
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("Cannot read /addcluster body: %v\n", err)
+			http.Error(w, "Bad PUT body", http.StatusBadRequest)
+			return
+		}
+
+		jsonClusters := make([]jsonClusterInfo, 0)
+		err = json.Unmarshal(body, &jsonClusters)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// update cluster info in dnsStore
+		store.clusters = intoClusterMap(jsonClusters)
+		// update consistent
+		cfg := consistent.Config{
+			PartitionCount:    len(store.clusters),
+			ReplicationFactor: 2, // We are forced to have number larger than 1
+			Load:              3,
+			Hasher:            hasher{},
+		}
+		log.Println("Received cluster update, setting lookup")
+		store.lookup = consistent.New(nil, cfg)
+		for _, cluster := range store.clusters {
+			store.lookup.Add(clusterToken(cluster.token))
+			log.Println("New cluster:", cluster.token)
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	go func() {
 		if err := http.ListenAndServe(":"+strconv.Itoa(port), router); err != nil {
 			done <- err
