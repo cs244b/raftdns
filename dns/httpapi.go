@@ -21,6 +21,7 @@ func checkValidRRString(s string) bool {
 	return err == nil && rr != nil
 }
 
+<<<<<<< HEAD
 func shouldMigrate(domain string, store *dnsStore) bool {
 	clusterToken := store.lookup.LocateKey([]byte(domain)).String()
 	log.Println("Computed cluster is", clusterToken)
@@ -92,6 +93,8 @@ func (t clusterToken) String() string {
 // 	}
 // }
 
+=======
+>>>>>>> master
 type deleteRequestPayload struct {
 	Name         string `json:"name"`
 	RRTypeString string `json:"rrType"`
@@ -298,6 +301,69 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 		log.Println("Writing RR", string(b))
 		// writes back the json record
 		io.WriteString(w, string(b))
+	})
+
+	// PUT /member/{nodeID}
+	// body: string(url, e.g. http://127.0.0.1:42379)
+	// Example: curl -L http://127.0.0.1:12380/member/{replace with NODE_ID} -XPUT -d http://127.0.0.1:42379
+
+	// DELETE /member/{nodeID}
+	// body: none
+	// Example: curl -L http://127.0.0.1:12380/member/{replace with NODE_ID} -XDELETE
+	router.HandleFunc("/member/{nodeID}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" {
+			url, err := ioutil.ReadAll(r.Body)
+			if err != nil {
+				log.Printf("Failed to read on PUT for /member (%v)\n", err)
+				http.Error(w, "Failed on PUT", http.StatusBadRequest)
+				return
+			}
+
+			vars := mux.Vars(r)
+			nodeID, err := strconv.ParseUint(vars["nodeID"], 0, 64)
+			if err != nil {
+				log.Printf("Failed to convert ID for conf change (%v)\n", err)
+				http.Error(w, "Failed on PUT", http.StatusBadRequest)
+				return
+			}
+
+			cc := raftpb.ConfChange{
+				Type:    raftpb.ConfChangeAddNode,
+				NodeID:  nodeID,
+				Context: url,
+			}
+			confChangeC <- cc
+
+			// As above, optimistic that raft will apply the conf change
+			w.WriteHeader(http.StatusNoContent)
+		} else if r.Method == "DELETE" {
+			vars := mux.Vars(r)
+			nodeID, err := strconv.ParseUint(vars["nodeID"], 0, 64)
+			if err != nil {
+				log.Printf("Failed to convert ID for conf change (%v)\n", err)
+				http.Error(w, "Failed on DELETE", http.StatusBadRequest)
+				return
+			}
+
+			cc := raftpb.ConfChange{
+				Type:   raftpb.ConfChangeRemoveNode,
+				NodeID: nodeID,
+			}
+			confChangeC <- cc
+
+			// As above, optimistic that raft will apply the conf change
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			http.Error(w, "/member Method has to be PUT or DELELTE", http.StatusBadRequest)
+			return
+		}
+		/* Example:
+		./dns_server --id 1 --cluster http://127.0.0.1:10000 --port 10001
+		curl -L http://127.0.0.1:10001/member/2 -XPUT -d http://127.0.0.1:20000
+		./dns_server --join --id 2 --cluster http://127.0.0.1:10000,http://127.0.0.1:20000 --port 20001
+		# Then do some DNS requests
+		curl -L http://127.0.0.1:20001/member/1 -XDELETE
+		*/
 	})
 
 	go func() {

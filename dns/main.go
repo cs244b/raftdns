@@ -33,6 +33,7 @@ func main() {
 	// include the port in hash server ip addr
 	hashServer := flag.String("hash", "", "the ip address of a hash server to help with migration")
 	config := flag.String("config", "", "the path to the json file containing the config for this cluster")
+	usePaged := flag.Bool("page", false, "use paged version of DNS store")
 	// zoneFile := flag.String("zonefile", "", "Zone file provided during init")
 	flag.Parse()
 
@@ -41,26 +42,48 @@ func main() {
 	confChangeC := make(chan raftpb.ConfChange)
 	defer close(confChangeC)
 
-	// raft provides a commit stream for the proposals from the http api
-	var dnsStore *dnsStore
-	getSnapshot := func() ([]byte, error) { return dnsStore.getSnapshot() }
-	commitC, errorC, snapshotterReady := newRaftNode(*id, strings.Split(*cluster, ","), *join, getSnapshot, proposeC, confChangeC)
+	if *usePaged {
+		// Use special paged version
 
-	clusterIP := []string{}
-	for i, ip := range strings.Split(*cluster, ",") {
-		// !Careful, hardcoded length
-		clusterIP = append(clusterIP, ip[:len(ip)-4]+strconv.Itoa(*httpAPIPort))
-		log.Printf("cluster ip %v\n", clusterIP[i])
+		// raft provides a commit stream for the proposals from the http api
+		var dnsStore *pagedDNSStore
+		getSnapshot := func() ([]byte, error) { return dnsStore.getSnapshot() }
+		commitC, errorC, snapshotterReady := newRaftNode(*id, strings.Split(*cluster, ","), *join, getSnapshot, proposeC, confChangeC)
+
+		clusterIP := []string{}
+		for i, ip := range strings.Split(*cluster, ",") {
+			// !Careful, hardcoded length
+			clusterIP = append(clusterIP, ip[:len(ip)-4]+strconv.Itoa(*httpAPIPort))
+			log.Printf("cluster ip %v\n", clusterIP[i])
+		}
+
+		dnsStore = newPagedDNSStore(<-snapshotterReady, proposeC, commitC, errorC, clusterIP, *id)
+
+		// For dig queries
+		PagedServeUDPAPI(dnsStore)
+		// For write requests
+		PagedServeHTTPAPI(dnsStore, *httpAPIPort, confChangeC, errorC)
+	} else {
+		// raft provides a commit stream for the proposals from the http api
+		var dnsStore *dnsStore
+		getSnapshot := func() ([]byte, error) { return dnsStore.getSnapshot() }
+		commitC, errorC, snapshotterReady := newRaftNode(*id, strings.Split(*cluster, ","), *join, getSnapshot, proposeC, confChangeC)
+		clusterIP := []string{}
+		for i, ip := range strings.Split(*cluster, ",") {
+			// !Careful, hardcoded length
+			clusterIP = append(clusterIP, ip[:len(ip)-4]+strconv.Itoa(*httpAPIPort))
+			log.Printf("cluster ip %v\n", clusterIP[i])
+		}
+
+		dnsStore = newDNSStore(<-snapshotterReady, proposeC, commitC, errorC, clusterIP, *id)
+
+		// For dig queries
+		serveUDPAPI(dnsStore)
+		// For migration
+		if *migrate {
+			go migrateDNS(dnsStore, hashServer, config)
+		}
+		// For write requests
+		serveHTTPAPI(dnsStore, *httpAPIPort, confChangeC, errorC)
 	}
-
-	dnsStore = newDNSStore(<-snapshotterReady, proposeC, commitC, errorC, clusterIP, *id)
-
-	// For dig queries
-	serveUDPAPI(dnsStore)
-	// For migration
-	if *migrate {
-		go migrateDNS(dnsStore, hashServer, config)
-	}
-	// For write requests
-	serveHTTPAPI(dnsStore, *httpAPIPort, confChangeC, errorC)
 }
