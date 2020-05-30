@@ -1,0 +1,9 @@
+{
+	"cluster": "cluster3",
+	"members": [
+		{
+		"name": "ns3.example.com.",
+		"glue": "ns3.example.com. 3600 IN A 172.31.19.166"
+		}
+	]
+}

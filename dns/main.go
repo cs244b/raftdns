@@ -16,7 +16,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -64,6 +63,4 @@ func main() {
 	}
 	// For write requests
 	serveHTTPAPI(dnsStore, *httpAPIPort, confChangeC, errorC)
-
-	fmt.Println(*hashServer)
 }

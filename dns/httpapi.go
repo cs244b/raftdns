@@ -122,6 +122,7 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 			http.Error(w, "Bad RR request", http.StatusBadRequest)
 			return
 		}
+		log.Println("\t adding", rrString)
 
 		store.ProposeAddRR(rrString)
 		// Optimistic-- no waiting for ack from raft. Value is not yet
@@ -225,7 +226,7 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 			Load:              3,
 			Hasher:            hasher{},
 		}
-		log.Println("Received cluster update, setting lookup")
+		log.Println("Received cluster update, setting new config")
 		store.lookup = consistent.New(nil, cfg)
 		for _, clusterJSON := range store.config {
 			store.lookup.Add(clusterToken(clusterJSON.ClusterToken))
@@ -279,8 +280,7 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 
 			// check if this domain name should be migrated
 			domain := domainNames[index]
-			log.Println("Calling shouldMigrate with", domain, store.lookup)
-			log.Println(store.lookup.LocateKey([]byte(domain)).String())
+			// log.Println(store.lookup.LocateKey([]byte(domain)).String())
 			if shouldMigrate(domain, store) {
 				for _, rrs := range store.store[domainNames[index]] {
 					records = append(records, rrs...)
@@ -294,7 +294,6 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 			http.Error(w, "Marshal Failed", http.StatusInternalServerError)
 			return
 		}
-		log.Println(string(b))
 
 		log.Println("Writing RR", string(b))
 		// writes back the json record

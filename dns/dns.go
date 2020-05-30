@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/miekg/dns"
 )
@@ -251,7 +253,7 @@ func getClusterInfo(hashServer string) []jsonClusterInfo {
 		log.Fatal("Failed to read cluster info response", err)
 	}
 
-	fmt.Printf("Received: %s\n", body)
+	// fmt.Printf("Received: %s\n", body)
 	jsonClusters := make([]jsonClusterInfo, 0)
 	err = json.Unmarshal(body, &jsonClusters)
 	if err != nil {
@@ -264,7 +266,7 @@ func getClusterInfo(hashServer string) []jsonClusterInfo {
 func disableWrites(hashServer string) {
 	// send write disable request to hash server and
 	// wait for ack before return
-	fmt.Println("Hash Server write disabled")
+	log.Println("Hash Server write disabled")
 }
 
 func updateConfig(clusters []jsonClusterInfo, configPath *string) []jsonClusterInfo {
@@ -283,7 +285,7 @@ func updateConfig(clusters []jsonClusterInfo, configPath *string) []jsonClusterI
 	if err != nil {
 		log.Fatal("Update config unmarshal:", err)
 	}
-	fmt.Println(newCluster.ClusterToken)
+	// fmt.Println(newCluster.ClusterToken)
 	return append(clusters, newCluster)
 }
 
@@ -314,6 +316,7 @@ func sendClusterInfo(clusters []jsonClusterInfo, destIP string) {
 	}
 	req.ContentLength = int64(len(string(clusterJSON)))
 	resp, err := http.DefaultClient.Do(req)
+	log.Println("Received cluster info response", destIP)
 	if err != nil {
 		log.Fatal("sendClusterInfo: ", err)
 	}
@@ -323,52 +326,56 @@ func sendClusterInfo(clusters []jsonClusterInfo, destIP string) {
 }
 
 func retrieveRR(clusters []jsonClusterInfo, store *dnsStore) {
+	var wg sync.WaitGroup
 	// excluding our own cluster
+	errorC := make(chan error)
 	for _, cluster := range clusters[:len(clusters)-1] {
 		member := cluster.Members[0]
 		t := strings.Split(member.GlueRecord, " ")
 		memberIP := t[len(t)-1]
 		addr := "http://" + memberIP + ":9121/getrecord"
-		errorC := make(chan error)
-		go func(addr string, store *dnsStore, errorC chan<- error) {
-			log.Println("Start retrieving ", addr)
+		wg.Add(1)
+		go func(addr string, store *dnsStore, errorC chan<- error, wg *sync.WaitGroup) {
+			defer wg.Done()
+			log.Println("Start retrieving RR from", addr)
 			counter := 0
 			for {
-				log.Println("1")
 				req, err := http.NewRequest("GET", addr, strings.NewReader(strconv.Itoa(counter)))
 				if err != nil {
-					log.Fatal(err)
+					errorC <- err
 					return
 				}
 				req.ContentLength = int64(len(strconv.Itoa(counter)))
 				resp, err := http.DefaultClient.Do(req)
-				log.Println("2")
 				if err != nil {
-					log.Fatal(err)
+					errorC <- err
 					return
 				}
 
-				log.Println("Requested, prepare to read", counter)
 				body, err := ioutil.ReadAll(resp.Body)
 				if err != nil {
-					log.Fatal(err)
+					errorC <- err
+					return
 				}
 				// parse body
 				var records []string
 				err = json.Unmarshal(body, &records)
 				if err != nil {
-					log.Fatal(err)
+					errorC <- err
+					return
 				}
 				log.Println("Received", records)
 				if len(records) == 1 && records[0] == "Done" {
 					// finished reading
-					log.Println("Finsihed reading")
+					log.Println("Finished reading RRs")
 					return
 				}
 				// go through Raft to add RRs
 				for _, rrString := range records {
 					if !checkValidRRString(rrString) {
-						log.Fatal("Received bad RR")
+						// log.Fatal("Received bad RR")
+						errorC <- errors.New("Recevied bad RR")
+						return
 					}
 					// this is async, might cause too much traffic
 					store.ProposeAddRR(rrString)
@@ -376,7 +383,23 @@ func retrieveRR(clusters []jsonClusterInfo, store *dnsStore) {
 				}
 				counter++
 			}
-		}(addr, store, errorC)
+		}(addr, store, errorC, &wg)
+	}
+
+	// check if a go thread failed
+	c := make(chan struct{})
+	go func() {
+		// waiting for retrieveRR go routines to finish
+		wg.Wait()
+		c <- struct{}{}
+	}()
+	select {
+	case <-c:
+		// success
+		return
+	case err := <-errorC:
+		// some go thread failed
+		log.Fatal("retrieveRR", err)
 	}
 }
 

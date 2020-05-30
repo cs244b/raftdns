@@ -269,7 +269,7 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 			Load:              3,
 			Hasher:            hasher{},
 		}
-		log.Println("Received cluster update, setting lookup")
+		log.Println("Received cluster update, setting new config")
 		store.lookup = consistent.New(nil, cfg)
 		for _, cluster := range store.clusters {
 			store.lookup.Add(clusterToken(cluster.token))
@@ -317,7 +317,7 @@ func sendDNSMsgUntilSuccess(m *dns.Msg, servers []*nsInfo) (*dns.Msg, error) {
 }
 
 // Returns true if through direct query we have all answers. Otherwise return false
-func tryDirectQuery(store *hashServerStore, batchList []batchedDNSQuestions, msg *dns.Msg) bool {
+func tryDirectQuery(store *hashServerStore, batchList []batchedDNSQuestions, msg *dns.Msg, rd bool) bool {
 	var wg sync.WaitGroup
 
 	var answerLock sync.Mutex // protects hasAllAnswers and msg
@@ -330,7 +330,7 @@ func tryDirectQuery(store *hashServerStore, batchList []batchedDNSQuestions, msg
 			defer wg.Done()
 
 			m := new(dns.Msg)
-			m.RecursionDesired = true // Also seek recursive. See comment below for behavior implications
+			m.RecursionDesired = rd // Also seek recursive. See comment below for behavior implications
 			m.Question = *batch.questions
 
 			// This will try all servers one by one on preference order until depletion of the list
@@ -489,7 +489,7 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 		mDirect := new(dns.Msg)
 		mDirect.Id = r.Id
 		mDirect.Question = append(mDirect.Question, r.Question...)
-		if tryDirectQuery(store, batchList, mDirect) {
+		if tryDirectQuery(store, batchList, mDirect, r.RecursionDesired) {
 			w.WriteMsg(mDirect)
 			return
 		}
