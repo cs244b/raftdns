@@ -28,11 +28,12 @@ func main() {
 	cluster := flag.String("cluster", "http://127.0.0.1:9021", "comma separated cluster peers")
 	id := flag.Int("id", 1, "node ID")
 	// PLEASE use 9121! hash_server.go assumes this port for forwarding
-	httpAPIPort := flag.Int("port", 9122, "dns HTTP API server port")
+	httpAPIPort := flag.Int("port", 9121, "dns HTTP API server port")
 	join := flag.Bool("join", false, "join an existing cluster")
 	migrate := flag.Bool("migrate", false, "need to coordinate migration")
 	// include the port in hash server ip addr
 	hashServer := flag.String("hash", "", "the ip address of a hash server to help with migration")
+	config := flag.String("config", "", "the path to the json file containing the config for this cluster")
 	// zoneFile := flag.String("zonefile", "", "Zone file provided during init")
 	flag.Parse()
 
@@ -57,13 +58,12 @@ func main() {
 
 	// For dig queries
 	serveUDPAPI(dnsStore)
-	// For write requests
-	fmt.Println("Done")
-	go serveHTTPAPI(dnsStore, *httpAPIPort, confChangeC, errorC)
-
-	fmt.Println(*hashServer)
 	// For migration
 	if *migrate {
-		migrateDNS(dnsStore, hashServer)
+		go migrateDNS(dnsStore, hashServer, config)
 	}
+	// For write requests
+	serveHTTPAPI(dnsStore, *httpAPIPort, confChangeC, errorC)
+
+	fmt.Println(*hashServer)
 }

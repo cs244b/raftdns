@@ -1,13 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/miekg/dns"
 )
@@ -219,14 +220,16 @@ func serveUDPAPI(store *dnsStore) {
 	})
 }
 
-type nsInfo struct {
-	nsName     string
-	glueRecord dns.RR
-	aliveSince time.Time    // Mark since when the server is considered alive (will be a timestamp in the future if server is found to be down during polling)
-	aliveMutex sync.RWMutex // Mutex protecting aliveSince
+type jsonNsInfo struct {
+	NsName     string `json:"name"`
+	GlueRecord string `json:"glue"`
+}
+type jsonClusterInfo struct {
+	ClusterToken string       `json:"cluster"`
+	Members      []jsonNsInfo `json:"members"`
 }
 
-func getClusterInfo(hashServer *string) {
+func getClusterInfo(hashServer *string) []jsonClusterInfo {
 	// send HTTP request to hash server to retrieve cluster info
 	addr := *hashServer + "/clusterinfo"
 	req, err := http.NewRequest("GET", addr, strings.NewReader(""))
@@ -245,16 +248,159 @@ func getClusterInfo(hashServer *string) {
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatal("Failed to read cluster info response")
+		log.Fatal("Failed to read cluster info response", err)
 	}
 
 	fmt.Printf("Received: %s\n", body)
+	jsonClusters := make([]jsonClusterInfo, 0)
+	err = json.Unmarshal(body, &jsonClusters)
+	if err != nil {
+		log.Fatal(err)
+	}
 	// return cluster
+	return jsonClusters
 }
 
-func migrateDNS(store *dnsStore, hashServer *string) {
-	// retrieve cluster info
-	getClusterInfo(hashServer)
+func disableWrites(hashServer *string) {
+	// send write disable request to hash server and
+	// wait for ack before return
+	fmt.Println("Hash Server write disabled")
+}
 
+func updateConfig(clusters []jsonClusterInfo, configPath *string) []jsonClusterInfo {
+	file, err := os.Open(*configPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	fileContent, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatal("Update config read failed: ", err)
+	}
+	var newCluster jsonClusterInfo
+	err = json.Unmarshal(fileContent, &newCluster)
+	if err != nil {
+		log.Fatal("Update config unmarshal:", err)
+	}
+	fmt.Println(newCluster.ClusterToken)
+	return append(clusters, newCluster)
+}
+
+// print out []jsonClusterInfo
+func PrintClusterConfig(clusters []jsonClusterInfo) {
+	for _, cluster := range clusters {
+		fmt.Println(cluster.ClusterToken)
+		for _, member := range cluster.Members {
+			fmt.Println("\t", member.NsName)
+			fmt.Println("\t", member.GlueRecord)
+		}
+	}
+}
+
+// send the updated cluster info to other Raft clusters
+// the last entry in clusters is the new cluster
+func sendClusterInfo(clusters []jsonClusterInfo) {
+	for _, cluster := range clusters[:len(clusters)-1] {
+		// pick the first member ot send the cluster config to
+		member := cluster.Members[0]
+		t := strings.Split(member.GlueRecord, " ")
+		memberIP := t[len(t)-1]
+		addr := "http://" + memberIP + ":9121/addcluster"
+		clusterJSON, err := json.Marshal(clusters)
+		log.Println("Sending cluster info to", addr)
+		if err != nil {
+			log.Fatal("sendClusterInfo: ", err)
+		}
+		req, err := http.NewRequest("PUT", addr, strings.NewReader(string(clusterJSON)))
+		if err != nil {
+			log.Fatal("sendClusterInfo: ", err)
+		}
+		req.ContentLength = int64(len(string(clusterJSON)))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Fatal("sendClusterInfo: ", err)
+		}
+		if resp.StatusCode != http.StatusNoContent {
+			log.Fatal("sendClusterInfo request failed at server side")
+		}
+	}
+}
+
+func retrieveRR(clusters []jsonClusterInfo, store *dnsStore) {
+	// excluding our own cluster
+	for _, cluster := range clusters[:len(clusters)-1] {
+		member := cluster.Members[0]
+		t := strings.Split(member.GlueRecord, " ")
+		memberIP := t[len(t)-1]
+		addr := "http://" + memberIP + ":9121/getrecord"
+		errorC := make(chan error)
+		go func(addr string, store *dnsStore, errorC chan<- error) {
+			log.Println("Start retrieving ", addr)
+			counter := 0
+			for {
+				log.Println("1")
+				req, err := http.NewRequest("GET", addr, strings.NewReader(strconv.Itoa(counter)))
+				if err != nil {
+					log.Fatal(err)
+					return
+				}
+				req.ContentLength = int64(len(strconv.Itoa(counter)))
+				resp, err := http.DefaultClient.Do(req)
+				log.Println("2")
+				if err != nil {
+					log.Fatal(err)
+					return
+				}
+
+				log.Println("Requested, prepare to read", counter)
+				body, err := ioutil.ReadAll(resp.Body)
+				if err != nil {
+					log.Fatal(err)
+				}
+				// parse body
+				var records []string
+				err = json.Unmarshal(body, &records)
+				if err != nil {
+					log.Fatal(err)
+				}
+				log.Println("Received", records)
+				if len(records) == 1 && records[0] == "Done" {
+					// finished reading
+					log.Println("Finsihed reading")
+					return
+				}
+				// go through Raft to add RRs
+				for _, rrString := range records {
+					if !checkValidRRString(rrString) {
+						log.Fatal("Received bad RR")
+					}
+					// this is async, might cause too much traffic
+					store.ProposeAddRR(rrString)
+					log.Println("Adding RR:", rrString)
+				}
+				counter++
+			}
+		}(addr, store, errorC)
+	}
+}
+
+func migrateDNS(store *dnsStore, hashServer *string, config *string) {
+	// retrieve cluster info
+	clusters := getClusterInfo(hashServer)
 	// disable writes
+	disableWrites(hashServer)
+	// update hash configuration
+	clusters = updateConfig(clusters, config)
+	PrintClusterConfig(clusters)
+	// send new config to other Raft clusters
+	sendClusterInfo(clusters)
+	// retrieve RR
+	retrieveRR(clusters, store)
+
+	// update cluster info at hash servers
+
+	// kick off garbage collection at other clusters
+
+	// enable write
 }

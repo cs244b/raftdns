@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/buraksezer/consistent"
 	"github.com/coreos/etcd/snap"
 
 	"github.com/miekg/dns"
@@ -48,6 +49,10 @@ type dnsStore struct {
 	// for sending http Cache requests
 	cluster []string
 	id      int
+	// for adding new cluster and migration
+	config []jsonClusterInfo
+	// to compute if a key should be migrated
+	lookup *consistent.Consistent
 }
 
 func newDNSStore(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <-chan *string, errorC <-chan error, cluster []string, id int) *dnsStore {
