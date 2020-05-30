@@ -23,7 +23,7 @@ func checkValidRRString(s string) bool {
 
 func shouldMigrate(domain string, store *dnsStore) bool {
 	clusterToken := store.lookup.LocateKey([]byte(domain)).String()
-	log.Println("Computed cluster ", clusterToken)
+	log.Println("Computed cluster is", clusterToken)
 	return clusterToken == store.config[len(store.config)-1].ClusterToken
 }
 
@@ -275,11 +275,11 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 				for k := range store.store {
 					domainNames = append(domainNames, k)
 				}
-				log.Println("key copy: ", domainNames)
 			}
 
 			// check if this domain name should be migrated
 			domain := domainNames[index]
+			log.Println("Domain is ", domain)
 			// log.Println(store.lookup.LocateKey([]byte(domain)).String())
 			if shouldMigrate(domain, store) {
 				for _, rrs := range store.store[domainNames[index]] {
