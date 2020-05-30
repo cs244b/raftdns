@@ -21,7 +21,6 @@ func checkValidRRString(s string) bool {
 	return err == nil && rr != nil
 }
 
-<<<<<<< HEAD
 func shouldMigrate(domain string, store *dnsStore) bool {
 	clusterToken := store.lookup.LocateKey([]byte(domain)).String()
 	log.Println("Computed cluster is", clusterToken)
@@ -93,8 +92,6 @@ func (t clusterToken) String() string {
 // 	}
 // }
 
-=======
->>>>>>> master
 type deleteRequestPayload struct {
 	Name         string `json:"name"`
 	RRTypeString string `json:"rrType"`
