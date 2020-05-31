@@ -1,5 +1,6 @@
 raftexample-*/
 *.pcapng
+*.pcapng
 __pychache__
 *.pyc
-
+pagedir/

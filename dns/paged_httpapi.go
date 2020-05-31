@@ -13,18 +13,8 @@ import (
 	"github.com/gorilla/mux"
 )
 
-func checkValidRRString(s string) bool {
-	rr, err := dns.NewRR(s)
-	return err == nil && rr != nil
-}
-
-type deleteRequestPayload struct {
-	Name         string `json:"name"`
-	RRTypeString string `json:"rrType"`
-}
-
-// serveHTTPAPI starts a http server with APIs to write to nameservers
-func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChange, errorC <-chan error) {
+// PagedServeHTTPAPI starts a http server with APIs to write to nameservers
+func PagedServeHTTPAPI(store *pagedDNSStore, port int, confChangeC chan<- raftpb.ConfChange, errorC <-chan error) {
 	router := mux.NewRouter()
 
 	// PUT /add
@@ -174,9 +164,10 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 			return
 		}
 		/* Example:
-		./dns_server --id 1 --cluster http://127.0.0.1:10000 --port 10001
+		./dns_server --page --id 1 --cluster http://127.0.0.1:10000 --port 10001
 		curl -L http://127.0.0.1:10001/member/2 -XPUT -d http://127.0.0.1:20000
-		./dns_server --join --id 2 --cluster http://127.0.0.1:10000,http://127.0.0.1:20000 --port 20001
+		# In a different directory!
+		./dns_server --page --join --id 2 --cluster http://127.0.0.1:10000,http://127.0.0.1:20000 --port 20001
 		# Then do some DNS requests
 		curl -L http://127.0.0.1:20001/member/1 -XDELETE
 		*/
