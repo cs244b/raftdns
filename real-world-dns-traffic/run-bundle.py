@@ -11,6 +11,7 @@ from config import SERVER_IP
 from config import SMALL_TRAFFIC_FILE
 from config import LARGE_TRAFFIC_FILE
 from config import MEDIUM_TRAFFIC_FILE
+from config import HUGE_TRAFFIC_FILE
 from constants import NAMESERVERS
 
 def parseArgs():
@@ -22,6 +23,8 @@ def parseArgs():
             traffic_file = MEDIUM_TRAFFIC_FILE
         if sys.argv[1] == 'large':
             traffic_file = LARGE_TRAFFIC_FILE
+        if sys.argv[1] == 'huge':
+            traffic_file = HUGE_TRAFFIC_FILE
     traffic_case = None
     if len(sys.argv) > 2:
         if sys.argv[2] == 'file':

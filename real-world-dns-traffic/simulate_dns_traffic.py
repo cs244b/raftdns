@@ -76,7 +76,12 @@ def parse_packet(packet):
     rec_type = packet['DNSQR'].qtype
     qname = packet['DNSQR'].qname.decode("utf-8")
     dns = packet['DNS']
-    answer = dns.an[dns.ancount - 1].rdata
+    answer = None
+    for i in range(dns.ancount):
+        try:
+            answer = dns.an[i].rdata
+        except:
+            pass
     return qname, rec_type, answer
 
         
@@ -88,7 +93,7 @@ def fill_query_q(query_q, traffic_file, traffic_case, verbose=True):
     if traffic_case == 'file':
         packets = PcapReader(traffic_file)
         for packet in packets:
-            if packet.haslayer(DNS) and packet.haslayer('DNSQR') and packet.haslayer('DNSRR'):
+            if packet.haslayer(DNS) and packet.haslayer('DNSQR') and packet.haslayer('DNSRR'): 
                 query_q.put(parse_packet(packet))
     if traffic_case == 'single':
         packets = PcapReader(traffic_file)
