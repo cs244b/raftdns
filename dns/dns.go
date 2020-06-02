@@ -306,7 +306,7 @@ func sendClusterInfo(clusters []jsonClusterInfo, destIP string) {
 	// pick the first member ot send the cluster config to
 	addr := "http://" + destIP + ":9121/addcluster"
 	clusterJSON, err := json.Marshal(clusters)
-	log.Println("Sending cluster info to", addr)
+	log.Println("Sending cluster info", string(clusterJSON), "to", addr)
 	if err != nil {
 		log.Fatal("sendClusterInfo: ", err)
 	}
@@ -341,6 +341,7 @@ func retrieveRR(clusters []jsonClusterInfo, store *dnsStore) {
 			counter := 0
 			for {
 				req, err := http.NewRequest("GET", addr, strings.NewReader(strconv.Itoa(counter)))
+				log.Println(strconv.Itoa(counter))
 				if err != nil {
 					errorC <- err
 					return
@@ -378,6 +379,7 @@ func retrieveRR(clusters []jsonClusterInfo, store *dnsStore) {
 						return
 					}
 					// this is async, might cause too much traffic
+					// no need to acquire locks here since it is proposed through channel
 					store.ProposeAddRR(rrString)
 					log.Println("Adding RR:", rrString)
 				}

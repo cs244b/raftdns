@@ -40,58 +40,6 @@ func (t clusterToken) String() string {
 	return string(t)
 }
 
-// func (h *dnsHTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-// 	key := r.RequestURI
-// 	switch {
-// 	case r.Method == "POST":
-// 		url, err := ioutil.ReadAll(r.Body)
-// 		if err != nil {
-// 			log.Printf("Failed to read on POST (%v)\n", err)
-// 			http.Error(w, "Failed on POST", http.StatusBadRequest)
-// 			return
-// 		}
-
-// 		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
-// 		if err != nil {
-// 			log.Printf("Failed to convert ID for conf change (%v)\n", err)
-// 			http.Error(w, "Failed on POST", http.StatusBadRequest)
-// 			return
-// 		}
-
-// 		cc := raftpb.ConfChange{
-// 			Type:    raftpb.ConfChangeAddNode,
-// 			NodeID:  nodeId,
-// 			Context: url,
-// 		}
-// 		h.confChangeC <- cc
-
-// 		// As above, optimistic that raft will apply the conf change
-// 		w.WriteHeader(http.StatusNoContent)
-// 	case r.Method == "DELETE":
-// 		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
-// 		if err != nil {
-// 			log.Printf("Failed to convert ID for conf change (%v)\n", err)
-// 			http.Error(w, "Failed on DELETE", http.StatusBadRequest)
-// 			return
-// 		}
-
-// 		cc := raftpb.ConfChange{
-// 			Type:   raftpb.ConfChangeRemoveNode,
-// 			NodeID: nodeId,
-// 		}
-// 		h.confChangeC <- cc
-
-// 		// As above, optimistic that raft will apply the conf change
-// 		w.WriteHeader(http.StatusNoContent)
-// 	default:
-// 		w.Header().Set("Allow", "PUT")
-// 		w.Header().Add("Allow", "GET")
-// 		w.Header().Add("Allow", "POST")
-// 		w.Header().Add("Allow", "DELETE")
-// 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-// 	}
-// }
-
 type deleteRequestPayload struct {
 	Name         string `json:"name"`
 	RRTypeString string `json:"rrType"`
@@ -196,7 +144,30 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// TODO: confChange requests
+	// PUT /addcluster
+	// body: JSON(
+	// [
+	// 	{
+	// 		"cluster": "cluster1",
+	// 		"members": [
+	// 			{
+	// 				"name": "ns1.example.com.",
+	// 				"glue": "ns1.example.com. 3600 IN A 172.18.0.10"
+	// 			}
+	// 		]
+	// 	},
+	// 	{
+	// 		"cluster": "cluster2",
+	// 		"members": [
+	// 			{
+	// 				"name": "ns2.example.com.",
+	// 				"glue": "ns2.example.com. 3600 IN A 172.18.0.11"
+	// 			}
+	// 		]
+	// 	}
+	// ]
+	// )
+	// The body can be constructed from json.Marshal([]jsonClusterInfo)
 	router.HandleFunc("/addcluster", func(w http.ResponseWriter, r *http.Request) {
 		log.Println("add cluster")
 		if r.Method != "PUT" {
@@ -217,7 +188,9 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 			log.Fatal(err)
 		}
 		// update cluster info in dnsStore
+		store.mu.Lock()
 		store.config = jsonClusters
+		store.mu.Unlock()
 		PrintClusterConfig(store.config)
 		// update consistent
 		cfg := consistent.Config{
@@ -235,13 +208,19 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// TODO: confChange requests
 	var domainNames []string
 	type recordJSON struct {
 		DomainName string
 		RecordsMap dnsRRTypeMap
 	}
 
+	// GET /getrecord
+	// body: string(index)
+	// Responds with an array of rrString that correspond to the index-th domain name:
+	// This node keeps an array of domain names, a copy of keys of store.store,
+	// that the cluster is responsible for.
+	// ** Note that this array of rrString will be empty if the domain name does not
+	// belong to the new cluster.
 	router.HandleFunc("/getrecord", func(w http.ResponseWriter, r *http.Request) {
 		log.Println("HTTP request /getrecord")
 		if r.Method != "GET" {
@@ -251,7 +230,7 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 
 		body, err := ioutil.ReadAll(r.Body)
 		if err != nil {
-			log.Printf("Cannot read /addcluster body: %v\n", err)
+			log.Printf("Cannot read /getrecord body: %v\n", err)
 			http.Error(w, "Bad PUT body", http.StatusBadRequest)
 			return
 		}

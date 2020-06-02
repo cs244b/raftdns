@@ -32,6 +32,8 @@ func main() {
 	migrate := flag.Bool("migrate", false, "need to coordinate migration")
 	// include the port in hash server ip addr
 	hashServer := flag.String("hash", "", "the ip address of a hash server to help with migration")
+	// This config file should contain the JSON representaion of type jsonClusterInfo for the new cluster
+	// see new_config.json for example
 	config := flag.String("config", "", "the path to the json file containing the config for this cluster")
 	usePaged := flag.Bool("page", false, "use paged version of DNS store")
 	// zoneFile := flag.String("zonefile", "", "Zone file provided during init")
