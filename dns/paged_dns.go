@@ -7,38 +7,12 @@ import (
 	"github.com/miekg/dns"
 )
 
-// a.com => (a, com), empty string means cannot pop
-func popLeftmostLabel(domain string) (string, string) {
-	chunks := strings.SplitN(domain, ".", 2)
-	switch len(chunks) {
-	case 0:
-		return "", ""
-	case 1:
-		return "", domain
-	default:
-		return chunks[0], chunks[1]
-	}
-}
-
-// Convert a list of strings into RRs.
-// Silently consume errors
-func stringsToRRs(sList []string) []dns.RR {
-	rrs := []dns.RR{}
-	for _, s := range sList {
-		rr, err := dns.NewRR(s)
-		if err == nil {
-			rrs = append(rrs, rr)
-		}
-	}
-	return rrs
-}
-
 // Minimal version right now: replay resurive query
-func HandleRecursiveQuery(req *dns.Msg, r *dns.Msg, s *dnsStore) {
+func PagedHandleRecursiveQuery(req *dns.Msg, r *dns.Msg, s *pagedDNSStore) {
 	c := new(dns.Client)
 	in, _, err := c.Exchange(req, "8.8.8.8:53")
 	if err != nil {
-		log.Println("HandleRecursiveQuery Failed")
+		log.Println("PagedHandleRecursiveQuery Failed")
 		return
 	}
 	r.Answer = in.Answer
@@ -53,7 +27,7 @@ func HandleRecursiveQuery(req *dns.Msg, r *dns.Msg, s *dnsStore) {
 
 // Handle query from outside.
 // Supporting iterative queries only ATM
-func ProcessDNSQuery(req *dns.Msg, s *dnsStore) *dns.Msg {
+func PagedProcessDNSQuery(req *dns.Msg, s *pagedDNSStore) *dns.Msg {
 	res := new(dns.Msg)
 	res.SetReply(req)
 
@@ -62,7 +36,7 @@ func ProcessDNSQuery(req *dns.Msg, s *dnsStore) *dns.Msg {
 	unhandledQuestions := []dns.Question{}
 	// We ignore Qclass for now, since we only care about IN.
 	for _, q := range req.Question {
-		canHandleCurrentQuestion := HandleSingleQuestion(q.Name, q.Qtype, res, s)
+		canHandleCurrentQuestion := PagedHandleSingleQuestion(q.Name, q.Qtype, res, s)
 		if !canHandleCurrentQuestion {
 			unhandledQuestions = append(unhandledQuestions, q)
 		}
@@ -78,7 +52,7 @@ func ProcessDNSQuery(req *dns.Msg, s *dnsStore) *dns.Msg {
 		reqRec.Question = unhandledQuestions
 		// Create a new recursive query for unhandled questions
 		resRec := new(dns.Msg)
-		HandleRecursiveQuery(reqRec, resRec, s)
+		PagedHandleRecursiveQuery(reqRec, resRec, s)
 		// Merge results of local and recursive
 		res.Answer = append(res.Answer, resRec.Answer...)
 		res.Extra = append(res.Extra, resRec.Extra...)
@@ -90,12 +64,12 @@ func ProcessDNSQuery(req *dns.Msg, s *dnsStore) *dns.Msg {
 
 // See rfc1034 4.3.2
 // Returns whether this single question can be handled locally
-func HandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *dnsStore) bool {
+func PagedHandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *pagedDNSStore) bool {
 	domainName := strings.ToLower(name)
 	hasPreciseMatch := false
 
 	// XXX: handle CNAME if we have time
-	typeMap, hasTypeMap := s.store[domainName]
+	typeMap, hasTypeMap := s.getPage(domainName).Store[domainName]
 	if hasTypeMap {
 		rrStringList := typeMap[qType]
 		if rrStringList != nil && len(rrStringList) != 0 {
@@ -121,7 +95,7 @@ func HandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *dnsStore) bo
 					if ok {
 						cnameData := realCNameRR.Target
 						// retry with canonical name
-						return HandleSingleQuestion(cnameData, qType, r, s)
+						return PagedHandleSingleQuestion(cnameData, qType, r, s)
 					}
 				}
 			}
@@ -184,7 +158,8 @@ func HandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *dnsStore) bo
 		}
 		hasMatch := false
 		// Try with wildcard prefix
-		if wildcardTypeMap, ok := s.store["*."+rest]; ok {
+		wildcardName := "*." + rest
+		if wildcardTypeMap, ok := s.getPage(wildcardName).Store[wildcardName]; ok {
 			wildcardRRList := wildcardTypeMap[qType]
 			for _, wildCardRRString := range wildcardRRList {
 				rr, err := dns.NewRR(wildCardRRString)
@@ -206,11 +181,11 @@ func HandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *dnsStore) bo
 }
 
 // Implicitly at port 53
-func serveUDPAPI(store *dnsStore) {
-	server := &dns.Server{Addr: "0.0.0.0:53", Net: "udp"}
+func PagedServeUDPAPI(store *pagedDNSStore) {
+	server := &dns.Server{Addr: ":53", Net: "udp"}
 	go server.ListenAndServe()
 	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
-		res := ProcessDNSQuery(r, store)
+		res := PagedProcessDNSQuery(r, store)
 		w.WriteMsg(res)
 	})
 }
