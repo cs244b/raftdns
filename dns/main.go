@@ -29,6 +29,12 @@ func main() {
 	// PLEASE use 9121! hash_server.go assumes this port for forwarding
 	httpAPIPort := flag.Int("port", 9121, "dns HTTP API server port")
 	join := flag.Bool("join", false, "join an existing cluster")
+	migrate := flag.Bool("migrate", false, "need to coordinate migration")
+	// include the port in hash server ip addr
+	hashServer := flag.String("hash", "", "the ip address of a hash server to help with migration")
+	// This config file should contain the JSON representaion of type jsonClusterInfo for the new cluster
+	// see new_config.json for example
+	config := flag.String("config", "", "the path to the json file containing the config for this cluster")
 	usePaged := flag.Bool("page", false, "use paged version of DNS store")
 	// zoneFile := flag.String("zonefile", "", "Zone file provided during init")
 	flag.Parse()
@@ -64,7 +70,6 @@ func main() {
 		var dnsStore *dnsStore
 		getSnapshot := func() ([]byte, error) { return dnsStore.getSnapshot() }
 		commitC, errorC, snapshotterReady := newRaftNode(*id, strings.Split(*cluster, ","), *join, getSnapshot, proposeC, confChangeC)
-
 		clusterIP := []string{}
 		for i, ip := range strings.Split(*cluster, ",") {
 			// !Careful, hardcoded length
@@ -76,6 +81,10 @@ func main() {
 
 		// For dig queries
 		serveUDPAPI(dnsStore)
+		// For migration
+		if *migrate {
+			go migrateDNS(dnsStore, hashServer, config)
+		}
 		// For write requests
 		serveHTTPAPI(dnsStore, *httpAPIPort, confChangeC, errorC)
 	}

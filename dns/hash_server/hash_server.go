@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -51,6 +52,7 @@ type clusterInfo struct {
 type hashServerStore struct {
 	clusters map[clusterToken]clusterInfo
 	lookup   *consistent.Consistent
+	mu       sync.RWMutex
 }
 
 /**
@@ -215,6 +217,81 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 		w.WriteHeader(resp.StatusCode)
 	})
 
+	router.HandleFunc("/clusterinfo", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
+			return
+		}
+
+		// form a list clusters, each cluster is a list of nsInfo of nodes in the cluster
+
+		file, err := os.Open(*configFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer file.Close()
+		fileContent, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		io.WriteString(w, string(fileContent))
+		return
+	})
+
+	// probably updateconfig is a bettre name
+	// the current name is consistent with httpapi.go
+	router.HandleFunc("/addcluster", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("add cluster")
+		if r.Method != "PUT" {
+			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
+			return
+		}
+
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("Cannot read /addcluster body: %v\n", err)
+			http.Error(w, "Bad PUT body", http.StatusBadRequest)
+			return
+		}
+
+		jsonClusters := make([]jsonClusterInfo, 0)
+		err = json.Unmarshal(body, &jsonClusters)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// update cluster info in dnsStore
+		store.mu.Lock()
+		store.clusters = intoClusterMap(jsonClusters)
+		store.mu.Unlock()
+		// update consistent
+		cfg := consistent.Config{
+			PartitionCount:    len(store.clusters),
+			ReplicationFactor: 2, // We are forced to have number larger than 1
+			Load:              3,
+			Hasher:            hasher{},
+		}
+		log.Println("Received cluster update, setting new config")
+		store.lookup = consistent.New(nil, cfg)
+		for _, cluster := range store.clusters {
+			store.lookup.Add(clusterToken(cluster.token))
+			log.Println("New cluster:", cluster.token)
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	router.HandleFunc("/disablewrite", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("disable write operations at hash servers")
+		// TODO: fill in the logic for disabling writes
+	})
+
+	router.HandleFunc("/enablewrite", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("enable write operations at hash servers")
+		// TODO: fill in the logic for enable writes
+	})
+
 	go func() {
 		if err := http.ListenAndServe(":"+strconv.Itoa(port), router); err != nil {
 			done <- err
@@ -253,7 +330,7 @@ func sendDNSMsgUntilSuccess(m *dns.Msg, servers []*nsInfo) (*dns.Msg, error) {
 }
 
 // Returns true if through direct query we have all answers. Otherwise return false
-func tryDirectQuery(store *hashServerStore, batchList []batchedDNSQuestions, msg *dns.Msg) bool {
+func tryDirectQuery(store *hashServerStore, batchList []batchedDNSQuestions, msg *dns.Msg, rd bool) bool {
 	var wg sync.WaitGroup
 
 	var answerLock sync.Mutex // protects hasAllAnswers and msg
@@ -266,7 +343,7 @@ func tryDirectQuery(store *hashServerStore, batchList []batchedDNSQuestions, msg
 			defer wg.Done()
 
 			m := new(dns.Msg)
-			m.RecursionDesired = true // Also seek recursive. See comment below for behavior implications
+			m.RecursionDesired = rd // Also seek recursive. See comment below for behavior implications
 			m.Question = *batch.questions
 
 			// This will try all servers one by one on preference order until depletion of the list
@@ -425,7 +502,7 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 		mDirect := new(dns.Msg)
 		mDirect.Id = r.Id
 		mDirect.Question = append(mDirect.Question, r.Question...)
-		if tryDirectQuery(store, batchList, mDirect) {
+		if tryDirectQuery(store, batchList, mDirect, r.RecursionDesired) {
 			w.WriteMsg(mDirect)
 			return
 		}
@@ -445,6 +522,8 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 // The makeshift design is to have the server stop and does the migration manually.
 // However in real-world deployment we need to implement transparent migration without killing servers.
 
+var configFile *string
+
 func main() {
 	rand.Seed(time.Now().Unix())
 
@@ -452,7 +531,7 @@ func main() {
 		clusters: make(map[clusterToken]clusterInfo),
 	}
 
-	configFile := flag.String("config", "", "filename to load initial config")
+	configFile = flag.String("config", "", "filename to load initial config")
 	flag.Parse()
 
 	if err := loadConfig(&store, *configFile); err != nil {
