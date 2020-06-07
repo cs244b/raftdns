@@ -105,11 +105,11 @@ func throughputClient(idx int, done chan string, interval float64, tpC chan floa
 			} else {
 				numResponse++
 			}
-			// hack for benchmark
+			// for benchmark
 			if !*useHash {
 				time.Sleep(700 * time.Microsecond)
 			}
-			// hack for benchmark
+			// for benchmark
 		}
 	}
 }
@@ -146,6 +146,7 @@ func measureTp(duration int, numClient int, interval float64) {
 }
 
 func main() {
+	rand.Seed(time.Now().Unix())
 	dnsIP := flag.String("ip", "127.0.0.1", "comma separated ip addresses to send dns query to")
 	benchmarkType := flag.String("type", "t", "benchmark type: t for throughput, p for populate")
 	// client send at its full speed. Change client number to adjust sending rate
