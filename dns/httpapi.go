@@ -200,10 +200,12 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 			Hasher:            hasher{},
 		}
 		log.Println("Received cluster update, setting new config")
+		store.mu.Lock()
 		store.lookup = consistent.New(nil, cfg)
 		for _, clusterJSON := range store.config {
 			store.lookup.Add(clusterToken(clusterJSON.ClusterToken))
 		}
+		store.mu.Unlock()
 
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -251,20 +253,24 @@ func serveHTTPAPI(store *dnsStore, port int, confChangeC chan<- raftpb.ConfChang
 			if index == 0 {
 				// start migrating resource records
 				// make a copy of keys (domain names)
+				store.rlockStore()
 				for k := range store.store {
 					domainNames = append(domainNames, k)
 				}
+				store.runlockStore()
 			}
 
 			// check if this domain name should be migrated
 			domain := domainNames[index]
 			log.Println("Domain is ", domain)
 			// log.Println(store.lookup.LocateKey([]byte(domain)).String())
+			store.rlockStore()
 			if shouldMigrate(domain, store) {
 				for _, rrs := range store.store[domainNames[index]] {
 					records = append(records, rrs...)
 				}
 			}
+			store.runlockStore()
 		}
 
 		b, err := json.Marshal(records)

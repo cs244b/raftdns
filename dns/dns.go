@@ -263,12 +263,6 @@ func getClusterInfo(hashServer string) []jsonClusterInfo {
 	return jsonClusters
 }
 
-func disableWrites(hashServer string) {
-	// send write disable request to hash server and
-	// wait for ack before return
-	log.Println("Hash Server write disabled")
-}
-
 func updateConfig(clusters []jsonClusterInfo, configPath *string) []jsonClusterInfo {
 	file, err := os.Open(*configPath)
 	if err != nil {
@@ -405,10 +399,21 @@ func retrieveRR(clusters []jsonClusterInfo, store *dnsStore) {
 	}
 }
 
+// TODO: notify every other cluster to garbage collect
+// the records that they no longer need to keep b/c of
+// the new cluster
 func startGarbageCollect(clusters []jsonClusterInfo) {
 	log.Println("Garbage Collection started")
 }
 
+// TODO: notify the hash sverver to stop processing writes
+func disableWrites(hashServer string) {
+	// send write disable request to hash server and
+	// wait for ack before return
+	log.Println("Hash Server write disabled")
+}
+
+// TODO: notify the hash server to start processing writes
 func enableWrites(hashServer string) {
 	log.Println("Enable writes at the hash server at", hashServer)
 }

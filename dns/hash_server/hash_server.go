@@ -52,6 +52,7 @@ type clusterInfo struct {
 type hashServerStore struct {
 	clusters map[clusterToken]clusterInfo
 	lookup   *consistent.Consistent
+	mu       sync.RWMutex
 }
 
 /**
@@ -261,7 +262,9 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 		}
 
 		// update cluster info in dnsStore
+		store.mu.Lock()
 		store.clusters = intoClusterMap(jsonClusters)
+		store.mu.Unlock()
 		// update consistent
 		cfg := consistent.Config{
 			PartitionCount:    len(store.clusters),
@@ -277,6 +280,16 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 		}
 
 		w.WriteHeader(http.StatusNoContent)
+	})
+
+	router.HandleFunc("/disablewrite", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("disable write operations at hash servers")
+		// TODO: fill in the logic for disabling writes
+	})
+
+	router.HandleFunc("/enablewrite", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("enable write operations at hash servers")
+		// TODO: fill in the logic for enable writes
 	})
 
 	go func() {
