@@ -503,6 +503,7 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 		mDirect.Id = r.Id
 		mDirect.Question = append(mDirect.Question, r.Question...)
 		if tryDirectQuery(store, batchList, mDirect, r.RecursionDesired) {
+			mDirect.Response = true
 			w.WriteMsg(mDirect)
 			return
 		}
@@ -513,7 +514,7 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 		mBroadcast.Id = r.Id
 		mBroadcast.Question = append(mBroadcast.Question, r.Question...)
 		tryBroadcastAndMerge(store, mBroadcast)
-
+		mBroadcast.Response = true
 		w.WriteMsg(mBroadcast)
 	})
 }
