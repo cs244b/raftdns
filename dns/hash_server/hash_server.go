@@ -131,6 +131,7 @@ type deleteRequestPayload struct {
 	RRTypeString string `json:"rrType"`
 }
 
+// no lock protected
 var writeEnabled bool = true
 
 // Problems: how to handle star queries?
@@ -299,13 +300,23 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 	})
 
 	router.HandleFunc("/disablewrite", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" {
+			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
+			return
+		}
 		writeEnabled = false
 		log.Println("disable write operations at hash servers")
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	router.HandleFunc("/enablewrite", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" {
+			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
+			return
+		}
 		writeEnabled = true
 		log.Println("enable write operations at hash servers")
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	go func() {
