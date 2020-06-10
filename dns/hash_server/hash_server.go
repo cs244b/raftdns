@@ -648,9 +648,9 @@ func serveHashServerUDPAPI(store *hashServerStore, useCache bool) {
 		w.WriteMsg(mBroadcast)
 		// add cache here
 		if useCache {
-			store.addCacheRecords(mDirect.Answer)
-			store.addCacheRecords(mDirect.Ns)
-			store.addCacheRecords(mDirect.Extra)
+			store.addCacheRecords(mBroadcast.Answer)
+			store.addCacheRecords(mBroadcast.Ns)
+			store.addCacheRecords(mBroadcast.Extra)
 		}
 	})
 }
