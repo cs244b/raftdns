@@ -64,6 +64,8 @@ type hashServerStore struct {
 	lookup   *consistent.Consistent
 	mu       sync.RWMutex
 	cache    *lru.ARCCache
+	// no lock protected
+	writeEnabled bool
 }
 
 /**
@@ -145,7 +147,7 @@ type deleteRequestPayload struct {
 }
 
 // no lock protected
-var writeEnabled bool = true
+// var writeEnabled bool = true
 
 // Problems: how to handle star queries?
 func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error) {
@@ -156,7 +158,7 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 	// PUT /add
 	// body: string(rrString)
 	router.HandleFunc("/add", func(w http.ResponseWriter, r *http.Request) {
-		if !writeEnabled {
+		if !store.writeEnabled {
 			http.Error(w, "Write is disabled", http.StatusMethodNotAllowed)
 			return
 		}
@@ -199,7 +201,7 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 	// PUT /delete
 	// body: JSON({ name: string, rrType: string("A" | "NS" for now) })
 	router.HandleFunc("/delete", func(w http.ResponseWriter, r *http.Request) {
-		if !writeEnabled {
+		if !store.writeEnabled {
 			http.Error(w, "Write is disabled", http.StatusMethodNotAllowed)
 			return
 		}
@@ -267,7 +269,7 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 	// probably updateconfig is a bettre name
 	// the current name is consistent with httpapi.go
 	router.HandleFunc("/addcluster", func(w http.ResponseWriter, r *http.Request) {
-		if !writeEnabled {
+		if !store.writeEnabled {
 			http.Error(w, "Write is disabled", http.StatusMethodNotAllowed)
 			return
 		}
@@ -317,7 +319,7 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
 			return
 		}
-		writeEnabled = false
+		store.writeEnabled = false
 		log.Println("disable write operations at hash servers")
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -327,7 +329,7 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
 			return
 		}
-		writeEnabled = true
+		store.writeEnabled = true
 		log.Println("enable write operations at hash servers")
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -699,7 +701,8 @@ func main() {
 	rand.Seed(time.Now().Unix())
 
 	store := hashServerStore{
-		clusters: make(map[clusterToken]clusterInfo),
+		clusters:     make(map[clusterToken]clusterInfo),
+		writeEnabled: true,
 	}
 
 	configFile = flag.String("config", "", "filename to load initial config")
