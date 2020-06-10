@@ -100,6 +100,7 @@ func ProcessDNSQuery(req *dns.Msg, s *dnsStore) *dns.Msg {
 // Returns whether this single question can be handled locally
 func HandleSingleQuestion(name string, qType uint16, r *dns.Msg, s *dnsStore) bool {
 	domainName := strings.ToLower(name)
+	log.Println("Hanlde single question", domainName)
 	hasPreciseMatch := false
 
 	// XXX: handle CNAME if we have time

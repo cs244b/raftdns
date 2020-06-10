@@ -21,6 +21,7 @@ import (
 	"github.com/buraksezer/consistent"
 	"github.com/cespare/xxhash"
 	"github.com/gorilla/mux"
+	lru "github.com/hashicorp/golang-lru"
 	"github.com/miekg/dns"
 )
 
@@ -49,10 +50,20 @@ type clusterInfo struct {
 	members []*nsInfo    // Each participant cluster has >= 3 members in a normal Raft design. Any one of them can handle r/w request
 }
 
+type rrType = uint16
+
+type cacheRRInfo struct {
+	ttl        uint32
+	createTime time.Time
+}
+
+type cacheRRTypeMap map[rrType]map[string]cacheRRInfo
+
 type hashServerStore struct {
 	clusters map[clusterToken]clusterInfo
 	lookup   *consistent.Consistent
 	mu       sync.RWMutex
+	cache    *lru.ARCCache
 }
 
 /**
@@ -64,6 +75,7 @@ type jsonNsInfo struct {
 	NsName     string `json:"name"`
 	GlueRecord string `json:"glue"`
 }
+
 type jsonClusterInfo struct {
 	ClusterToken string       `json:"cluster"`
 	Members      []jsonNsInfo `json:"members"`
@@ -98,6 +110,7 @@ func (c *jsonClusterInfo) intoClusterInfo() clusterInfo {
 	}
 	return ci
 }
+
 func intoClusterMap(clusters []jsonClusterInfo) map[clusterToken]clusterInfo {
 	m := make(map[clusterToken]clusterInfo)
 	for _, c := range clusters {
@@ -495,13 +508,131 @@ func getPreferredServerIPsInOrder(members []*nsInfo) []*nsInfo {
 	return append(aliveServers, deadServers...)
 }
 
-func serveHashServerUDPAPI(store *hashServerStore) {
+func (store *hashServerStore) getCacheRecords(domainName string, qType uint16) []*dns.RR {
+	cacheRecords := []*dns.RR{}
+
+	// check cache
+	tempCacheMap, hasCacheMap := store.cache.Get(domainName)
+
+	if hasCacheMap {
+		cacheMap, ok := tempCacheMap.(cacheRRTypeMap)
+		if !ok {
+			log.Fatal("Cache type cast failed")
+		}
+		// rlcok to protect reading into map
+		store.mu.RLock()
+		cacheInfoMap := cacheMap[qType]
+		if cacheInfoMap != nil && len(cacheInfoMap) != 0 {
+			for crString, crInfo := range cacheInfoMap {
+				cr, err := dns.NewRR(crString)
+				// check cache validity
+				timeDiff := uint32(time.Since(crInfo.createTime).Seconds())
+				// newTTL := validCache(&crInfo)
+				if err == nil && cr != nil && timeDiff < crInfo.ttl {
+					// restore ttl
+					cr.Header().Ttl = crInfo.ttl - timeDiff
+					cacheRecords = append(cacheRecords, &cr)
+				} else {
+					// remove invalid cache
+					delete(cacheInfoMap, crString)
+				}
+			}
+		}
+		store.mu.RUnlock()
+	}
+
+	return cacheRecords
+}
+
+func (store *hashServerStore) queryCache(r *dns.Msg) (*dns.Msg, bool) {
+	log.Println("Query hashserver cache")
+	response := new(dns.Msg)
+
+	// for now, we only serve from cache if all questions can be answered from cache
+	for _, q := range r.Question {
+		cacheRRPtrs := store.getCacheRecords(q.Name, q.Qtype)
+		// no cache records
+		if len(cacheRRPtrs) == 0 {
+			// fall back to query Raft clusters
+			return nil, false
+		}
+		// use cache records as answers
+		for _, cr := range cacheRRPtrs {
+			response.Answer = append(response.Answer, *cr)
+		}
+	}
+
+	log.Println("[success] Query hashserver cache")
+	return response, true
+}
+
+func (store *hashServerStore) addCacheRecord(rr dns.RR) {
+	if rr.Header().Name == "." {
+		// ignore dummy entry from 8.8.8.8 DNS
+		return
+	}
+
+	// check if domain name is in cache
+	domainName := strings.ToLower(rr.Header().Name)
+	tmpCacheMap, hasCacheMap := store.cache.Get(domainName)
+	var cacheMap cacheRRTypeMap
+	if !hasCacheMap {
+		cacheMap = make(cacheRRTypeMap)
+		// domainName -> cacheMap
+	} else {
+		// cast back to cacheRRTypeMap
+		cacheMap = tmpCacheMap.(cacheRRTypeMap)
+	}
+	store.cache.Add(domainName, cacheMap)
+
+	// check if rr type is in cache
+	rType := rr.Header().Rrtype
+	// wlock to protect map update
+	store.mu.Lock()
+	cacheRRs, hasCR := cacheMap[rType]
+	if !hasCR {
+		cacheMap[rType] = make(map[string]cacheRRInfo)
+		cacheRRs, _ = cacheMap[rType]
+	}
+
+	// use 0 tll for all cache records to generate same key for diff ttl
+	ttl := rr.Header().Ttl
+	rr.Header().Ttl = 0
+	crInfo := cacheRRInfo{ttl, time.Now()}
+	cacheRRs[rr.String()] = crInfo
+	// unlock!
+	store.mu.Unlock()
+
+	// restore ttl
+	rr.Header().Ttl = ttl
+	log.Printf("Added cache %v\n", rr.String())
+}
+
+func (store *hashServerStore) addCacheRecords(records []dns.RR) {
+	for _, rr := range records {
+		store.addCacheRecord(rr)
+	}
+}
+
+func serveHashServerUDPAPI(store *hashServerStore, useCache bool) {
 	server := &dns.Server{Addr: "0.0.0.0:53", Net: "udp"}
 	go server.ListenAndServe()
 	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
 		// HashServer has no choice but to make the request on behalf of the client
 		// (at least to the layer of this single logical DNS nameserver)
 		// due to possibility of asterisk records
+
+		// Step 0: Consult local cache
+		if useCache {
+			mCache, hasCache := store.queryCache(r)
+			if hasCache {
+				// can respond from cache directly
+				mCache.Id = r.Id
+				mCache.Response = true
+				w.WriteMsg(mCache)
+				return
+			}
+		}
 
 		// Step 1: for each DNS question, locate which servers to forward the partial questions
 		batchMap := make(map[clusterToken]batchedDNSQuestions)
@@ -532,6 +663,12 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 		if tryDirectQuery(store, batchList, mDirect, r.RecursionDesired) {
 			mDirect.Response = true
 			w.WriteMsg(mDirect)
+			// add cache here
+			if useCache {
+				store.addCacheRecords(mDirect.Answer)
+				store.addCacheRecords(mDirect.Ns)
+				store.addCacheRecords(mDirect.Extra)
+			}
 			return
 		}
 
@@ -543,6 +680,12 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 		tryBroadcastAndMerge(store, mBroadcast)
 		mBroadcast.Response = true
 		w.WriteMsg(mBroadcast)
+		// add cache here
+		if useCache {
+			store.addCacheRecords(mBroadcast.Answer)
+			store.addCacheRecords(mBroadcast.Ns)
+			store.addCacheRecords(mBroadcast.Extra)
+		}
 	})
 }
 
@@ -560,6 +703,7 @@ func main() {
 	}
 
 	configFile = flag.String("config", "", "filename to load initial config")
+	cacheSize := flag.Int("cache", 0, "cache size at hash server")
 	flag.Parse()
 
 	if err := loadConfig(&store, *configFile); err != nil {
@@ -584,7 +728,18 @@ func main() {
 	httpDone := make(chan error)
 	// Hard coded port number
 	serveHashServerHTTPAPI(&store, 9121, httpDone)
-	serveHashServerUDPAPI(&store)
+	if *cacheSize > 0 {
+		// create cache
+		var err error
+		store.cache, err = lru.NewARC(*cacheSize)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		serveHashServerUDPAPI(&store, true)
+	} else {
+		serveHashServerUDPAPI(&store, false)
+	}
 
 	<-httpDone
 }
