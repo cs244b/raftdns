@@ -131,6 +131,8 @@ type deleteRequestPayload struct {
 	RRTypeString string `json:"rrType"`
 }
 
+var writeEnabled bool = true
+
 // Problems: how to handle star queries?
 func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error) {
 	router := mux.NewRouter()
@@ -140,6 +142,10 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 	// PUT /add
 	// body: string(rrString)
 	router.HandleFunc("/add", func(w http.ResponseWriter, r *http.Request) {
+		if !writeEnabled {
+			http.Error(w, "Write is disabled", http.StatusMethodNotAllowed)
+			return
+		}
 		if r.Method != "PUT" {
 			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
 			return
@@ -179,6 +185,11 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 	// PUT /delete
 	// body: JSON({ name: string, rrType: string("A" | "NS" for now) })
 	router.HandleFunc("/delete", func(w http.ResponseWriter, r *http.Request) {
+		if !writeEnabled {
+			http.Error(w, "Write is disabled", http.StatusMethodNotAllowed)
+			return
+		}
+
 		if r.Method != "PUT" {
 			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
 			return
@@ -242,6 +253,11 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 	// probably updateconfig is a bettre name
 	// the current name is consistent with httpapi.go
 	router.HandleFunc("/addcluster", func(w http.ResponseWriter, r *http.Request) {
+		if !writeEnabled {
+			http.Error(w, "Write is disabled", http.StatusMethodNotAllowed)
+			return
+		}
+
 		log.Println("add cluster")
 		if r.Method != "PUT" {
 			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
@@ -283,13 +299,13 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 	})
 
 	router.HandleFunc("/disablewrite", func(w http.ResponseWriter, r *http.Request) {
+		writeEnabled = false
 		log.Println("disable write operations at hash servers")
-		// TODO: fill in the logic for disabling writes
 	})
 
 	router.HandleFunc("/enablewrite", func(w http.ResponseWriter, r *http.Request) {
+		writeEnabled = true
 		log.Println("enable write operations at hash servers")
-		// TODO: fill in the logic for enable writes
 	})
 
 	go func() {
