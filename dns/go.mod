@@ -12,6 +12,7 @@ require (
 	github.com/gogo/protobuf v1.3.1 // indirect
 	github.com/golang/protobuf v1.4.0 // indirect
 	github.com/gorilla/mux v1.7.4
+	github.com/hashicorp/golang-lru v0.5.4
 	github.com/miekg/dns v1.1.29
 	github.com/prometheus/client_golang v1.5.1 // indirect
 	github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2 // indirect
