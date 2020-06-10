@@ -492,6 +492,8 @@ func (store *hashServerStore) getCacheRecords(domainName string, qType uint16) [
 		if !ok {
 			log.Fatal("Cache type cast failed")
 		}
+		// rlcok to protect reading into map
+		store.mu.RLock()
 		cacheInfoMap := cacheMap[qType]
 		if cacheInfoMap != nil && len(cacheInfoMap) != 0 {
 			for crString, crInfo := range cacheInfoMap {
@@ -509,6 +511,7 @@ func (store *hashServerStore) getCacheRecords(domainName string, qType uint16) [
 				}
 			}
 		}
+		store.mu.RUnlock()
 	}
 
 	return cacheRecords
@@ -557,6 +560,8 @@ func (store *hashServerStore) addCacheRecord(rr dns.RR) {
 
 	// check if rr type is in cache
 	rType := rr.Header().Rrtype
+	// wlock to protect map update
+	store.mu.Lock()
 	cacheRRs, hasCR := cacheMap[rType]
 	if !hasCR {
 		cacheMap[rType] = make(map[string]cacheRRInfo)
@@ -568,6 +573,8 @@ func (store *hashServerStore) addCacheRecord(rr dns.RR) {
 	rr.Header().Ttl = 0
 	crInfo := cacheRRInfo{ttl, time.Now()}
 	cacheRRs[rr.String()] = crInfo
+	// unlock!
+	store.mu.Unlock()
 
 	// restore ttl
 	rr.Header().Ttl = ttl
