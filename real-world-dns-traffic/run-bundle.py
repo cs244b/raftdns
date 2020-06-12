@@ -43,11 +43,13 @@ if __name__=='__main__':
     print('############# RUNNING BUNDLE ###########')
     print('########################################')
     nameservers, ips = [], []
-    counts, runtimes, failures = [], [], []
     for nameserver, ip in NAMESERVERS.items():
         nameservers.append(nameserver)
         ips.append(ip)
     choices = [i for i in range(len(nameservers))]
+    counts = [0 for _ in range(len(ips))]
+    runtimes = [0 for _ in range(len(ips))]
+    failures = [0 for _ in range(len(ips))]
     while len(choices) > 0:
         choice = random.choice(choices) 
         nameserver, ip = nameservers[choice], ips[choice]
@@ -58,9 +60,9 @@ if __name__=='__main__':
         count, runtime, failure = simulate_dns_traffic(
                 ip, traffic_file, traffic_case, 
                 verbose=False, taciturn=True, save_results=True)
-        counts.append(count)
-        runtimes.append(runtime)
-        failures.append(failure)
+        counts[choice] = count
+        runtimes[choice] = runtime
+        failures[choice] = failure
     now = datetime.now()
     dt = now.strftime("%d-%m-%H:%M:%S")
     file_name = 'bundles/bundle-at-{}'.format(dt)
