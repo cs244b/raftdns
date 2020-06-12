@@ -407,15 +407,41 @@ func startGarbageCollect(clusters []jsonClusterInfo) {
 	log.Println("Garbage Collection started")
 }
 
-// TODO: notify the hash sverver to stop processing writes
+// notify the hash sverver to stop processing writes
 func disableWrites(hashServer string) {
 	// send write disable request to hash server and
 	// wait for ack before return
+	addr := "http://" + hashServer + ":9121/disablewrite"
+	req, err := http.NewRequest("PUT", addr, strings.NewReader(""))
+	if err != nil {
+		log.Fatal("DisableWrites failure: ", err)
+	}
+	req.ContentLength = 0
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Fatal("DisableWrites failure: ", err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		log.Fatal("DisableWrites request failed at server side")
+	}
 	log.Println("Hash Server write disabled")
 }
 
-// TODO: notify the hash server to start processing writes
+// notify the hash server to start processing writes
 func enableWrites(hashServer string) {
+	addr := "http://" + hashServer + ":9121/enablewrite"
+	req, err := http.NewRequest("PUT", addr, strings.NewReader(""))
+	if err != nil {
+		log.Fatal("EnableWrites failure: ", err)
+	}
+	req.ContentLength = 0
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Fatal("EnableWrites failure: ", err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		log.Fatal("EnableWrites request failed at server side")
+	}
 	log.Println("Enable writes at the hash server at", hashServer)
 }
 
