@@ -11,6 +11,7 @@ from config import SERVER_IP
 from config import SMALL_TRAFFIC_FILE
 from config import LARGE_TRAFFIC_FILE
 from config import MEDIUM_TRAFFIC_FILE
+from config import HUGE_TRAFFIC_FILE
 from constants import NAMESERVERS
 
 def parseArgs():
@@ -22,6 +23,8 @@ def parseArgs():
             traffic_file = MEDIUM_TRAFFIC_FILE
         if sys.argv[1] == 'large':
             traffic_file = LARGE_TRAFFIC_FILE
+        if sys.argv[1] == 'huge':
+            traffic_file = HUGE_TRAFFIC_FILE
     traffic_case = None
     if len(sys.argv) > 2:
         if sys.argv[2] == 'file':
@@ -45,6 +48,9 @@ if __name__=='__main__':
         nameservers.append(nameserver)
         ips.append(ip)
     choices = [i for i in range(len(nameservers))]
+    counts = [0 for _ in range(len(ips))]
+    runtimes = [0 for _ in range(len(ips))]
+    failures = [0 for _ in range(len(ips))]
     while len(choices) > 0:
         choice = random.choice(choices) 
         nameserver, ip = nameservers[choice], ips[choice]
