@@ -44,9 +44,9 @@ def parseArgs():
 
 if __name__=='__main__':
     nameserver, traffic_file, traffic_case = parseArgs()
-    #print('\n ============ POPULATING {} file on {} nameserver============\n'
-    #        .format(traffic_file, nameserver, traffic_case))
-    #populate_dns_server(nameserver, traffic_file, taciturn=True, verbose=False)
+    print('\n ============ POPULATING {} file on {} nameserver============\n'
+            .format(traffic_file, nameserver, traffic_case))
+    populate_dns_server(nameserver, traffic_file, taciturn=True, verbose=False)
     print('\n ============ SIMULATING {} file on {} nameserver in use case: {} ============\n'
             .format(traffic_file, nameserver, traffic_case))
     simulate_dns_traffic(nameserver, traffic_file, traffic_case, 

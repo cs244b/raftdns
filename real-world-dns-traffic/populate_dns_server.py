@@ -22,7 +22,6 @@ def empty_request_q(
         record = record_form.format(domain, rec_types[rec_type], answer)
         if verbose:
             print('THREAD: sending request to {} with {}'.format(url, record))
-        res = None
         try:
             res = requests.put(url, data=record, timeout=request_timeout)
         except requests.exceptions.Timeout as e:

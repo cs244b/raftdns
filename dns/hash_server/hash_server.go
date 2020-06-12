@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -20,6 +21,7 @@ import (
 	"github.com/buraksezer/consistent"
 	"github.com/cespare/xxhash"
 	"github.com/gorilla/mux"
+	lru "github.com/hashicorp/golang-lru"
 	"github.com/miekg/dns"
 )
 
@@ -48,9 +50,22 @@ type clusterInfo struct {
 	members []*nsInfo    // Each participant cluster has >= 3 members in a normal Raft design. Any one of them can handle r/w request
 }
 
+type rrType = uint16
+
+type cacheRRInfo struct {
+	ttl        uint32
+	createTime time.Time
+}
+
+type cacheRRTypeMap map[rrType]map[string]cacheRRInfo
+
 type hashServerStore struct {
 	clusters map[clusterToken]clusterInfo
 	lookup   *consistent.Consistent
+	mu       sync.RWMutex
+	cache    *lru.ARCCache
+	// no lock protected
+	writeEnabled bool
 }
 
 /**
@@ -62,6 +77,7 @@ type jsonNsInfo struct {
 	NsName     string `json:"name"`
 	GlueRecord string `json:"glue"`
 }
+
 type jsonClusterInfo struct {
 	ClusterToken string       `json:"cluster"`
 	Members      []jsonNsInfo `json:"members"`
@@ -84,7 +100,7 @@ func (c *jsonClusterInfo) intoClusterInfo() clusterInfo {
 	now := time.Now()
 	for _, m := range c.Members {
 		glueRecord, err := dns.NewRR(m.GlueRecord)
-		if err != nil {
+		if err != nil || glueRecord == nil {
 			continue
 		}
 		mi := nsInfo{
@@ -96,6 +112,7 @@ func (c *jsonClusterInfo) intoClusterInfo() clusterInfo {
 	}
 	return ci
 }
+
 func intoClusterMap(clusters []jsonClusterInfo) map[clusterToken]clusterInfo {
 	m := make(map[clusterToken]clusterInfo)
 	for _, c := range clusters {
@@ -129,6 +146,9 @@ type deleteRequestPayload struct {
 	RRTypeString string `json:"rrType"`
 }
 
+// no lock protected
+// var writeEnabled bool = true
+
 // Problems: how to handle star queries?
 func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error) {
 	router := mux.NewRouter()
@@ -138,6 +158,10 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 	// PUT /add
 	// body: string(rrString)
 	router.HandleFunc("/add", func(w http.ResponseWriter, r *http.Request) {
+		if !store.writeEnabled {
+			http.Error(w, "Write is disabled", http.StatusMethodNotAllowed)
+			return
+		}
 		if r.Method != "PUT" {
 			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
 			return
@@ -151,7 +175,7 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 		rrString := string(body)
 
 		rr, err := dns.NewRR(rrString)
-		if err != nil {
+		if err != nil || rr == nil {
 			log.Println("Bad RR request")
 			http.Error(w, "Bad RR request", http.StatusBadRequest)
 			return
@@ -177,6 +201,11 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 	// PUT /delete
 	// body: JSON({ name: string, rrType: string("A" | "NS" for now) })
 	router.HandleFunc("/delete", func(w http.ResponseWriter, r *http.Request) {
+		if !store.writeEnabled {
+			http.Error(w, "Write is disabled", http.StatusMethodNotAllowed)
+			return
+		}
+
 		if r.Method != "PUT" {
 			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
 			return
@@ -213,6 +242,96 @@ func serveHashServerHTTPAPI(store *hashServerStore, port int, done chan<- error)
 		req.ContentLength = int64(len(body))
 		resp, err := http.DefaultClient.Do(req) // In its independent goroutine so blocking is fine
 		w.WriteHeader(resp.StatusCode)
+	})
+
+	router.HandleFunc("/clusterinfo", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
+			return
+		}
+
+		// form a list clusters, each cluster is a list of nsInfo of nodes in the cluster
+
+		file, err := os.Open(*configFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer file.Close()
+		fileContent, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		io.WriteString(w, string(fileContent))
+		return
+	})
+
+	// probably updateconfig is a bettre name
+	// the current name is consistent with httpapi.go
+	router.HandleFunc("/addcluster", func(w http.ResponseWriter, r *http.Request) {
+		if !store.writeEnabled {
+			http.Error(w, "Write is disabled", http.StatusMethodNotAllowed)
+			return
+		}
+
+		log.Println("add cluster")
+		if r.Method != "PUT" {
+			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
+			return
+		}
+
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("Cannot read /addcluster body: %v\n", err)
+			http.Error(w, "Bad PUT body", http.StatusBadRequest)
+			return
+		}
+
+		jsonClusters := make([]jsonClusterInfo, 0)
+		err = json.Unmarshal(body, &jsonClusters)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// update cluster info in dnsStore
+		store.mu.Lock()
+		store.clusters = intoClusterMap(jsonClusters)
+		store.mu.Unlock()
+		// update consistent
+		cfg := consistent.Config{
+			PartitionCount:    len(store.clusters),
+			ReplicationFactor: 2, // We are forced to have number larger than 1
+			Load:              3,
+			Hasher:            hasher{},
+		}
+		log.Println("Received cluster update, setting new config")
+		store.lookup = consistent.New(nil, cfg)
+		for _, cluster := range store.clusters {
+			store.lookup.Add(clusterToken(cluster.token))
+			log.Println("New cluster:", cluster.token)
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	router.HandleFunc("/disablewrite", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" {
+			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
+			return
+		}
+		store.writeEnabled = false
+		log.Println("disable write operations at hash servers")
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	router.HandleFunc("/enablewrite", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" {
+			http.Error(w, "Method has to be PUT", http.StatusBadRequest)
+			return
+		}
+		store.writeEnabled = true
+		log.Println("enable write operations at hash servers")
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	go func() {
@@ -253,7 +372,7 @@ func sendDNSMsgUntilSuccess(m *dns.Msg, servers []*nsInfo) (*dns.Msg, error) {
 }
 
 // Returns true if through direct query we have all answers. Otherwise return false
-func tryDirectQuery(store *hashServerStore, batchList []batchedDNSQuestions, msg *dns.Msg) bool {
+func tryDirectQuery(store *hashServerStore, batchList []batchedDNSQuestions, msg *dns.Msg, rd bool) bool {
 	var wg sync.WaitGroup
 
 	var answerLock sync.Mutex // protects hasAllAnswers and msg
@@ -266,7 +385,7 @@ func tryDirectQuery(store *hashServerStore, batchList []batchedDNSQuestions, msg
 			defer wg.Done()
 
 			m := new(dns.Msg)
-			m.RecursionDesired = true // Also seek recursive. See comment below for behavior implications
+			m.RecursionDesired = rd // Also seek recursive. See comment below for behavior implications
 			m.Question = *batch.questions
 
 			// This will try all servers one by one on preference order until depletion of the list
@@ -391,13 +510,131 @@ func getPreferredServerIPsInOrder(members []*nsInfo) []*nsInfo {
 	return append(aliveServers, deadServers...)
 }
 
-func serveHashServerUDPAPI(store *hashServerStore) {
-	server := &dns.Server{Addr: ":53", Net: "udp"}
+func (store *hashServerStore) getCacheRecords(domainName string, qType uint16) []*dns.RR {
+	cacheRecords := []*dns.RR{}
+
+	// check cache
+	tempCacheMap, hasCacheMap := store.cache.Get(domainName)
+
+	if hasCacheMap {
+		cacheMap, ok := tempCacheMap.(cacheRRTypeMap)
+		if !ok {
+			log.Fatal("Cache type cast failed")
+		}
+		// rlcok to protect reading into map
+		store.mu.RLock()
+		cacheInfoMap := cacheMap[qType]
+		if cacheInfoMap != nil && len(cacheInfoMap) != 0 {
+			for crString, crInfo := range cacheInfoMap {
+				cr, err := dns.NewRR(crString)
+				// check cache validity
+				timeDiff := uint32(time.Since(crInfo.createTime).Seconds())
+				// newTTL := validCache(&crInfo)
+				if err == nil && cr != nil && timeDiff < crInfo.ttl {
+					// restore ttl
+					cr.Header().Ttl = crInfo.ttl - timeDiff
+					cacheRecords = append(cacheRecords, &cr)
+				} else {
+					// remove invalid cache
+					delete(cacheInfoMap, crString)
+				}
+			}
+		}
+		store.mu.RUnlock()
+	}
+
+	return cacheRecords
+}
+
+func (store *hashServerStore) queryCache(r *dns.Msg) (*dns.Msg, bool) {
+	log.Println("Query hashserver cache")
+	response := new(dns.Msg)
+
+	// for now, we only serve from cache if all questions can be answered from cache
+	for _, q := range r.Question {
+		cacheRRPtrs := store.getCacheRecords(q.Name, q.Qtype)
+		// no cache records
+		if len(cacheRRPtrs) == 0 {
+			// fall back to query Raft clusters
+			return nil, false
+		}
+		// use cache records as answers
+		for _, cr := range cacheRRPtrs {
+			response.Answer = append(response.Answer, *cr)
+		}
+	}
+
+	log.Println("[success] Query hashserver cache")
+	return response, true
+}
+
+func (store *hashServerStore) addCacheRecord(rr dns.RR) {
+	if rr.Header().Name == "." {
+		// ignore dummy entry from 8.8.8.8 DNS
+		return
+	}
+
+	// check if domain name is in cache
+	domainName := strings.ToLower(rr.Header().Name)
+	tmpCacheMap, hasCacheMap := store.cache.Get(domainName)
+	var cacheMap cacheRRTypeMap
+	if !hasCacheMap {
+		cacheMap = make(cacheRRTypeMap)
+		// domainName -> cacheMap
+	} else {
+		// cast back to cacheRRTypeMap
+		cacheMap = tmpCacheMap.(cacheRRTypeMap)
+	}
+	store.cache.Add(domainName, cacheMap)
+
+	// check if rr type is in cache
+	rType := rr.Header().Rrtype
+	// wlock to protect map update
+	store.mu.Lock()
+	cacheRRs, hasCR := cacheMap[rType]
+	if !hasCR {
+		cacheMap[rType] = make(map[string]cacheRRInfo)
+		cacheRRs, _ = cacheMap[rType]
+	}
+
+	// use 0 tll for all cache records to generate same key for diff ttl
+	ttl := rr.Header().Ttl
+	rr.Header().Ttl = 0
+	crInfo := cacheRRInfo{ttl, time.Now()}
+	cacheRRs[rr.String()] = crInfo
+	// unlock!
+	store.mu.Unlock()
+
+	// restore ttl
+	rr.Header().Ttl = ttl
+	log.Printf("Added cache %v\n", rr.String())
+}
+
+func (store *hashServerStore) addCacheRecords(records []dns.RR) {
+	for _, rr := range records {
+		store.addCacheRecord(rr)
+	}
+}
+
+func serveHashServerUDPAPI(store *hashServerStore, useCache bool) {
+	server := &dns.Server{Addr: "0.0.0.0:53", Net: "udp"}
 	go server.ListenAndServe()
 	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
 		// HashServer has no choice but to make the request on behalf of the client
 		// (at least to the layer of this single logical DNS nameserver)
 		// due to possibility of asterisk records
+
+		// Step 0: Consult local cache
+		if useCache {
+			mCache, hasCache := store.queryCache(r)
+			if hasCache {
+				// can respond from cache directly
+				mCache.Id = r.Id
+				mCache.Response = true
+				w.WriteMsg(mCache)
+				return
+			}
+		}
 
 		// Step 1: for each DNS question, locate which servers to forward the partial questions
 		batchMap := make(map[clusterToken]batchedDNSQuestions)
@@ -425,8 +662,15 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 		mDirect := new(dns.Msg)
 		mDirect.Id = r.Id
 		mDirect.Question = append(mDirect.Question, r.Question...)
-		if tryDirectQuery(store, batchList, mDirect) {
+		if tryDirectQuery(store, batchList, mDirect, r.RecursionDesired) {
+			mDirect.Response = true
 			w.WriteMsg(mDirect)
+			// add cache here
+			if useCache {
+				store.addCacheRecords(mDirect.Answer)
+				store.addCacheRecords(mDirect.Ns)
+				store.addCacheRecords(mDirect.Extra)
+			}
 			return
 		}
 
@@ -436,8 +680,14 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 		mBroadcast.Id = r.Id
 		mBroadcast.Question = append(mBroadcast.Question, r.Question...)
 		tryBroadcastAndMerge(store, mBroadcast)
-
+		mBroadcast.Response = true
 		w.WriteMsg(mBroadcast)
+		// add cache here
+		if useCache {
+			store.addCacheRecords(mBroadcast.Answer)
+			store.addCacheRecords(mBroadcast.Ns)
+			store.addCacheRecords(mBroadcast.Extra)
+		}
 	})
 }
 
@@ -445,14 +695,18 @@ func serveHashServerUDPAPI(store *hashServerStore) {
 // The makeshift design is to have the server stop and does the migration manually.
 // However in real-world deployment we need to implement transparent migration without killing servers.
 
+var configFile *string
+
 func main() {
 	rand.Seed(time.Now().Unix())
 
 	store := hashServerStore{
-		clusters: make(map[clusterToken]clusterInfo),
+		clusters:     make(map[clusterToken]clusterInfo),
+		writeEnabled: true,
 	}
 
-	configFile := flag.String("config", "", "filename to load initial config")
+	configFile = flag.String("config", "", "filename to load initial config")
+	cacheSize := flag.Int("cache", 0, "cache size at hash server")
 	flag.Parse()
 
 	if err := loadConfig(&store, *configFile); err != nil {
@@ -477,7 +731,18 @@ func main() {
 	httpDone := make(chan error)
 	// Hard coded port number
 	serveHashServerHTTPAPI(&store, 9121, httpDone)
-	serveHashServerUDPAPI(&store)
+	if *cacheSize > 0 {
+		// create cache
+		var err error
+		store.cache, err = lru.NewARC(*cacheSize)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		serveHashServerUDPAPI(&store, true)
+	} else {
+		serveHashServerUDPAPI(&store, false)
+	}
 
 	<-httpDone
 }

@@ -43,6 +43,7 @@ if __name__=='__main__':
     print('############# RUNNING BUNDLE ###########')
     print('########################################')
     nameservers, ips = [], []
+    counts, runtimes, failures = [], [], []
     for nameserver, ip in NAMESERVERS.items():
         nameservers.append(nameserver)
         ips.append(ip)
@@ -60,9 +61,9 @@ if __name__=='__main__':
         count, runtime, failure = simulate_dns_traffic(
                 ip, traffic_file, traffic_case, 
                 verbose=False, taciturn=True, save_results=True)
-        counts[choice] = count
-        runtimes[choice] = runtime
-        failures[choice] = failure
+        counts.append(count)
+        runtimes.append(runtime)
+        failures.append(failure)
     now = datetime.now()
     dt = now.strftime("%d-%m-%H:%M:%S")
     file_name = 'bundles/bundle-at-{}'.format(dt)
